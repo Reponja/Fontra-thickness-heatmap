@@ -62,8 +62,8 @@ function usage() {
     "",
     "jsDelivr can only purge semver releases, not branches. If the pushed commit",
     "has no semver tag, this script creates the next patch tag (for example",
-    "v1.0.1), pushes it, and purges that release. It refreshes the @latest alias",
-    "root once so new visitors resolve to the release.",
+    "v1.0.1), pushes it, and purges that release. It also purges the runtime files",
+    "under @latest, because alias files have separate cache entries.",
     "",
     "Options:",
     "  --root <dir>      Folder containing plugin repositories (default: parent of this repo)",
@@ -72,7 +72,7 @@ function usage() {
     "  --force           Purge plugin.json even when no files changed",
     "  --tag <version>   Use this semver tag instead of the next patch version",
     "  --no-tag          Do not create or push tags (branch @latest cannot be purged)",
-    "  --refs <list>     Comma-separated jsDelivr refs (default: <release tag>)",
+    "  --refs <list>     Comma-separated jsDelivr refs (default: <release tag> plus @latest runtime files)",
     "  --state <file>    State file (default: %LOCALAPPDATA%\\FontraPluginPurge\\state.json)",
     "  --no-state        Do not read or write state; purge files from the last commit",
     "  --delay <ms>      Delay between purge requests (default: 250)",
@@ -454,6 +454,15 @@ function buildPurgeUrls(fullName, refs, files) {
   return urls;
 }
 
+function isRuntimeFile(file) {
+  return (
+    file === "plugin.json" ||
+    file === "start.js" ||
+    file === "icon.svg" ||
+    file.startsWith("src/")
+  );
+}
+
 function findFileForUrl(url, files) {
   let best = null;
   for (const file of files) {
@@ -472,7 +481,9 @@ async function verifyCdnFile(url, expected, options) {
   if (!expected) {
     return { ok: false, message: "file is missing from the pushed commit" };
   }
-  const cdnUrl = url.replace(PURGE_BASE, CDN_BASE);
+  const cdnUrl = `${url.replace(PURGE_BASE, CDN_BASE)}${
+    url.includes("?") ? "&" : "?"
+  }purgecheck=${Date.now()}`;
   try {
     const response = await fetch(cdnUrl, {
       headers: {
@@ -616,6 +627,58 @@ async function verifyLatest(fullName, tag, options) {
   return { ok: false, ...(last || {}) };
 }
 
+async function verifyAliasRuntimeFiles(info, files, dir, target, options) {
+  if (!files.length) {
+    return { stale: [], repurged: 0 };
+  }
+  let pending = [...files];
+  let repurged = 0;
+
+  for (let round = 0; round <= 2 && pending.length; round++) {
+    if (round > 0) {
+      console.log(
+        `  verify:  ${pending.length} @latest file${
+          pending.length === 1 ? "" : "s"
+        } still stale; re-purging...`
+      );
+      for (let i = 0; i < pending.length; i++) {
+        const url = `${purgeBase(info.fullName, "latest")}/${encodePath(
+          pending[i]
+        )}`;
+        await purgeUrl(url, options);
+        repurged++;
+        if (options.delay > 0 && i < pending.length - 1) {
+          await delay(options.delay);
+        }
+      }
+      await delay(options.throttleDelay);
+    }
+
+    const stale = [];
+    for (const file of pending) {
+      const url = `${purgeBase(info.fullName, "latest")}/${encodePath(file)}`;
+      const expected = fileContentAtCommit(dir, target, file);
+      const check = await verifyCdnFile(url, expected, options);
+      if (check.ok) {
+        if (options.verbose) {
+          console.log(`    current ${url}`);
+        }
+      } else {
+        stale.push(file);
+        if (options.verbose) {
+          console.log(`    stale ${url} — ${check.message}`);
+        }
+      }
+      if (options.delay > 0) {
+        await delay(options.delay);
+      }
+    }
+    pending = stale;
+  }
+
+  return { stale: pending, repurged };
+}
+
 function loadState(file) {
   try {
     const state = JSON.parse(readFileSync(file, "utf8"));
@@ -723,9 +786,9 @@ function resolveRefs(options, tag) {
   if (options.refs) {
     return options.refs;
   }
-  // jsDelivr shields every file under the resolved release, so purging the
-  // exact tag is enough. Asking for @latest/<file> as well doubles the request
-  // count and is what triggers jsDelivr's throttling.
+  // The release tag and the @latest alias have separate file caches. Purging
+  // only the tag leaves @latest/<file> entries pointing at the previous
+  // release, so processRepo also refreshes the runtime files under @latest.
   return tag ? [tag] : ["latest"];
 }
 
@@ -852,7 +915,9 @@ async function processRepo(dir, options, state) {
           "  note: a new release tag was pushed, so @latest still needs a purge."
         );
       } else {
-        return { ok: true };
+        console.log(
+          "  note: refreshing the @latest runtime files and verifying them."
+        );
       }
     }
   }
@@ -863,22 +928,36 @@ async function processRepo(dir, options, state) {
   files = [...new Set(files)].filter((file) => file && !file.endsWith("/"));
 
   const refs = resolveRefs(options, release.tag);
-  const aliasRootUrl =
+  // @latest/<file> has its own cache entry, separate from the release tag.
+  // Refreshing only the alias root is not enough: Fontra can keep loading an
+  // older src/*.js even when @latest/plugin.json reports the new version.
+  // Always refresh the small set of files Fontra actually loads.
+  const runtimeFiles =
     release.tag && !options.refs
-      ? `${purgeBase(info.fullName, "latest")}/`
-      : null;
+      ? listFilesAtCommit(dir, target).filter(isRuntimeFile)
+      : [];
   const urls = buildPurgeUrls(info.fullName, refs, files);
-  if (aliasRootUrl) {
-    urls.push(aliasRootUrl);
+  if (runtimeFiles.length) {
+    urls.push(...buildPurgeUrls(info.fullName, ["latest"], runtimeFiles));
   }
-  const refsLabel = aliasRootUrl
-    ? `${refs.join(", ")} + latest root`
+  const allPurgeFiles = [...new Set([...files, ...runtimeFiles])];
+  const aliasUrlSet = new Set(
+    runtimeFiles.map(
+      (file) => `${purgeBase(info.fullName, "latest")}/${encodePath(file)}`
+    )
+  );
+  const refsLabel = runtimeFiles.length
+    ? `${refs.join(", ")} + latest runtime files`
     : refs.join(", ");
 
   console.log(
     `  files:   ${files.length} (${
       from ? `changed since ${shortHash(from)}` : "all tracked files"
-    })`
+    })${
+      runtimeFiles.length
+        ? ` + ${runtimeFiles.length} runtime files under @latest`
+        : ""
+    }`
   );
   console.log(
     `  refs:    ${refsLabel}  requests: ${urls.length}${
@@ -958,6 +1037,11 @@ async function processRepo(dir, options, state) {
   const pendingRoots = [];
   const realFailed = [];
   for (const entry of failed) {
+    // @latest runtime files get a dedicated verification pass below, which
+    // can re-purge stale entries instead of failing the whole run here.
+    if (aliasUrlSet.has(entry.url)) {
+      continue;
+    }
     if (!entry.throttled) {
       realFailed.push(entry);
       continue;
@@ -968,7 +1052,7 @@ async function processRepo(dir, options, state) {
       pendingRoots.push(entry);
       continue;
     }
-    const file = findFileForUrl(entry.url, files);
+    const file = findFileForUrl(entry.url, allPurgeFiles);
     const expected = file ? fileContentAtCommit(dir, target, file) : null;
     const check = await verifyCdnFile(entry.url, expected, options);
     if (check.ok) {
@@ -987,6 +1071,22 @@ async function processRepo(dir, options, state) {
         message: `${entry.message}; ${check.message}`,
       });
     }
+  }
+
+  const aliasCheck = await verifyAliasRuntimeFiles(
+    info,
+    runtimeFiles,
+    dir,
+    target,
+    options
+  );
+  succeeded += aliasCheck.repurged;
+  for (const file of aliasCheck.stale) {
+    realFailed.push({
+      url: `${purgeBase(info.fullName, "latest")}/${encodePath(file)}`,
+      message: "@latest still serves different content",
+      status: null,
+    });
   }
 
   const currentNote = alreadyCurrent ? `, ${alreadyCurrent} already current` : "";
@@ -1052,6 +1152,13 @@ async function processRepo(dir, options, state) {
     return { ok: false, verifyFailed: true };
   }
 
+  if (normalizeVersion(verified.version) !== normalizeVersion(release.tag)) {
+    console.log(
+      `  verify:  @latest reported ${verified.version || "no version"}; expected ${release.tag}.`
+    );
+    console.log("           Re-run this script shortly.");
+    return { ok: false, verifyFailed: true };
+  }
   console.log(
     `  verify:  @latest resolves to ${verified.version} (${verified.type})`
   );

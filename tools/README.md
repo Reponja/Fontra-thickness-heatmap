@@ -43,7 +43,12 @@ The workflow is:
   example `v1.0.0`, then `v1.0.1`) at the **pushed** commit and pushes the tag.
   This is what makes `@latest` purgeable.
 - Purges the exact release tag (the cache entry that `@latest` resolves to) and
-  refreshes the `@latest` alias root once.
+  the runtime files Fontra loads under `@latest` (`plugin.json`, `start.js`,
+  `src/*.js`, and the icon). Alias files have their own cache entries, so
+  refreshing only the alias root can still leave Fontra loading an older
+  `src/core.js`.
+- Verifies the bytes served for those `@latest` runtime files, not just the
+  `x-jsd-version` header. If a file is stale, it re-purges it and checks again.
 - On the first run for a repository, purges **all tracked files**. That also
   clears caches left over from before you used this helper.
 - On later runs, purges only the files changed since the last successful purge.
@@ -100,7 +105,7 @@ node tools/purge-jsdelivr.mjs Reponja/Fontra-thickness-heatmap
 - `--since <commit>` — purge files changed since a specific commit.
 - `--force` — purge `plugin.json` even when nothing changed.
 - `--refs latest,1.2.3` — override the jsDelivr refs. By default the helper
-  purges only the resolved release tag, plus the `@latest` alias root.
+  purges the resolved release tag plus the runtime files under `@latest`.
 - `--root <dir>` — folder containing the plugin repositories.
 - `--state <file>` / `--no-state` — use a different state file, or none.
 - `--delay <ms>` — delay between requests (default `250`).
