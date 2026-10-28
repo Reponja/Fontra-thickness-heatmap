@@ -591,6 +591,44 @@ function boxBlurWeighted(values, weights, width, height, radius) {
   return { values: blurredValues, weights: blurredWeights };
 }
 
+/**
+ * A confident boundary sample may only supply a width to pixels that lie in
+ * front of it, roughly along its inward normal. Without this check, the nearest
+ * confident sample can sit across a junction or a concave corner, and its
+ * Voronoi wedge paints one stroke's color into the neighbouring stroke.
+ */
+export function sampleSupportsPixel(
+  samples,
+  seedIndex,
+  x,
+  y,
+  referenceTangent
+) {
+  const vx = x - samples.x[seedIndex];
+  const vy = y - samples.y[seedIndex];
+  const along = vx * samples.nx[seedIndex] + vy * samples.ny[seedIndex];
+  if (along < -0.5) {
+    return false;
+  }
+  const lateral = Math.abs(
+    vx * samples.ny[seedIndex] - vy * samples.nx[seedIndex]
+  );
+  if (lateral > along * 1.1 + 2) {
+    return false;
+  }
+  if (referenceTangent != null) {
+    // Tangents are stored as directions; cos(2 * delta) treats opposite
+    // directions as the same stroke and rejects a seed from another stroke.
+    const agreement = Math.cos(
+      2 * (samples.tangent[seedIndex] - referenceTangent)
+    );
+    if (agreement < 0.25) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function buildPixelMaps(analysis, mask, settings) {
   const { width, height, samples } = analysis;
   const n = width * height;
@@ -624,7 +662,7 @@ function buildPixelMaps(analysis, mask, settings) {
     // samples at junctions and terminals own large Voronoi wedges; letting them
     // supply values produced radial fans of wrong color.
     const confidentIndex = analysis.nearestConfidentSample[index];
-    const valueIndex =
+    let valueIndex =
       confidentIndex >= 0
         ? confidentIndex
         : settings.carefulMeasurement
@@ -632,6 +670,36 @@ function buildPixelMaps(analysis, mask, settings) {
           : rawIndex;
     if (valueIndex < 0) {
       continue;
+    }
+
+    // Reject a confident seed that is across a junction from this pixel. Fall
+    // back to the local sample when it is trusted enough (fast mode); otherwise
+    // leave the pixel to the confidence fade instead of pulling in a distant
+    // stroke's width or direction.
+    const rawConfidence = rawIndex >= 0 ? samples.confidence[rawIndex] : 0;
+    if (
+      valueIndex !== rawIndex &&
+      rawIndex >= 0 &&
+      !sampleSupportsPixel(
+        samples,
+        valueIndex,
+        index % analysis.width,
+        Math.floor(index / analysis.width),
+        // A stroke-end sample can be confidently rejected by careful mode but
+        // still have a perpendicular tangent. Only trust the local tangent when
+        // the raw sample itself is plausible.
+        rawConfidence >= 0.25 ? samples.tangent[rawIndex] : null
+      )
+    ) {
+      // A confident local sample is a better answer than a hole. Only fall
+      // back to it when it is trusted; otherwise let the fade handle the pixel.
+      valueIndex =
+        !settings.carefulMeasurement || rawConfidence >= CONFIDENCE_PROPAGATE
+          ? rawIndex
+          : -1;
+      if (valueIndex < 0) {
+        continue;
+      }
     }
 
     // The fade field still follows the plain nearest sample, so genuinely

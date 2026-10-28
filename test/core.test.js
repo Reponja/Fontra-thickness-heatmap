@@ -10,6 +10,7 @@ import {
   modelThicknessFactor,
   normalizeSettings,
   renderSignature,
+  sampleSupportsPixel,
 } from "../src/core.js";
 import {
   deviationGradientCSS,
@@ -333,6 +334,31 @@ test("ambiguous samples do not leak extreme widths into the pixel map", () => {
     }
   }
   assert.ok(maxPixel < barWidth * 1.5);
+});
+
+test("confident samples do not paint across a junction", () => {
+  const samples = {
+    x: new Float32Array([0, 0]),
+    y: new Float32Array([0, 0]),
+    nx: new Float32Array([1, 0]),
+    ny: new Float32Array([0, 1]),
+    tangent: new Float32Array([Math.PI / 2, 0]),
+  };
+
+  // A seed with a rightward inward normal reaches pixels in front of it.
+  assert.equal(sampleSupportsPixel(samples, 0, 10, 1, Math.PI / 2), true);
+
+  // A pixel off to the side must not enter that seed's Voronoi wedge.
+  assert.equal(sampleSupportsPixel(samples, 0, 0, 10, Math.PI / 2), false);
+  assert.equal(sampleSupportsPixel(samples, 0, -5, 0, Math.PI / 2), false);
+
+  // A pixel in front of the seed but on a stroke running the other way is
+  // still rejected; this is the junction case that used to bleed.
+  assert.equal(sampleSupportsPixel(samples, 0, 10, 1, 0), false);
+
+  // Without a trustworthy local tangent, the wedge test alone still works.
+  assert.equal(sampleSupportsPixel(samples, 0, 10, 1, null), true);
+  assert.equal(sampleSupportsPixel(samples, 0, 0, 10, null), false);
 });
 
 test("careful measurement rejects caliper chords at an inner junction", () => {

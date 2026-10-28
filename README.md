@@ -47,9 +47,9 @@ Fontra Pak.
 
 If Fontra still runs an older copy after an update, push first, then run
 `tools\purge-jsdelivr.cmd`. It tags the pushed commit as a semver release,
-purges `@latest` and that tag on jsDelivr for all your plugins, and verifies the
-result. If a plugin still looks old in Fontra, use DevTools’ “Disable cache”
-reload.
+purges the release tag and refreshes the `@latest` alias on jsDelivr for all
+your plugins, and verifies the result. If a plugin still looks old in Fontra,
+use DevTools’ “Disable cache” reload.
 
 ## How to read the map
 
@@ -151,10 +151,12 @@ ordinary fill rule.
    pixels.
 7. Propagate widths from the nearest **confident** boundary sample, so an
    ambiguous junction cannot paint a fan of wrong values into the stroke
-   interior. Low-confidence samples still drive the fade field in the deviation
-   views. The absolute target and measured views use the same propagated values
-   and fall back to the nearest raw sample only where no confident sample
-   exists.
+   interior. A sample may only reach pixels inside its inward-normal wedge and
+   on a compatible stroke direction, so a confident edge on one side of a
+   junction cannot bleed into the neighbouring stroke. Low-confidence samples
+   still drive the fade field in the deviation views. The absolute target and
+   measured views use the same propagated values and fall back to the nearest
+   raw sample only where no confident sample exists.
 8. Smooth the width field, and smooth stroke direction as a doubled-angle
    vector field. The model target is derived from that smoothed direction, so
    the target and deviation fields vary continuously across curves.
