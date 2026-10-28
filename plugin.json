@@ -1,0 +1,5 @@
+{
+  "name": "Thickness heatmap",
+  "init": "./start.js",
+  "function": "start"
+}

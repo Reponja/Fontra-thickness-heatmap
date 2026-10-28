@@ -1,0 +1,13 @@
+{
+  "name": "fontra-thickness-heatmap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A Fontra plugin that compares stroke thickness with a Noordzij-style pen model.",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

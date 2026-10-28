@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fontra thickness heatmap — standalone demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #f3f4f6;
+        color: #1f2933;
+      }
+      body {
+        margin: 0;
+        padding: 2rem;
+        background: #f3f4f6;
+      }
+      .app {
+        max-width: 1200px;
+        margin: 0 auto;
+        display: grid;
+        gap: 1.25rem;
+      }
+      h1 {
+        margin: 0;
+        font-size: 1.5rem;
+      }
+      p {
+        margin: 0;
+        line-height: 1.5;
+        max-width: 70ch;
+      }
+      .lede {
+        color: #52606d;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 1rem;
+        align-items: end;
+        padding: 1rem;
+        border: 1px solid #d9dde2;
+        border-radius: 12px;
+        background: #fff;
+      }
+      label {
+        display: grid;
+        gap: 0.35rem;
+        font-size: 0.85rem;
+        color: #52606d;
+      }
+      select,
+      input[type="range"] {
+        min-width: 10rem;
+      }
+      select {
+        padding: 0.4rem;
+        border: 1px solid #cbd2d9;
+        border-radius: 6px;
+        background: #fff;
+        font: inherit;
+      }
+      .canvases {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+      }
+      figure {
+        margin: 0;
+        padding: 0.75rem;
+        border: 1px solid #d9dde2;
+        border-radius: 12px;
+        background: #fff;
+      }
+      figcaption {
+        margin-top: 0.6rem;
+        color: #52606d;
+        font-size: 0.82rem;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 8px;
+        background: #fbfbfb;
+      }
+      .info {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+        gap: 1rem;
+      }
+      .panel {
+        padding: 1rem;
+        border: 1px solid #d9dde2;
+        border-radius: 12px;
+        background: #fff;
+      }
+      .panel h2 {
+        margin: 0 0 0.7rem;
+        font-size: 0.8rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #52606d;
+      }
+      .legend-bar {
+        height: 0.9rem;
+        border-radius: 5px;
+        border: 1px solid #d9dde2;
+      }
+      .legend-labels {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 0.4rem;
+        color: #52606d;
+        font-size: 0.8rem;
+        font-variant-numeric: tabular-nums;
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 0.3rem 1rem;
+        font-size: 0.9rem;
+      }
+      .stats div:nth-child(even) {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      .stats div:nth-child(odd) {
+        color: #52606d;
+      }
+      .legend-note {
+        margin-top: 0.6rem;
+        color: #52606d;
+        font-size: 0.82rem;
+        line-height: 1.4;
+      }
+      @media (max-width: 800px) {
+        body {
+          padding: 1rem;
+        }
+        .canvases,
+        .info {
+          grid-template-columns: 1fr;
+        }
+      }
+      @media (prefers-color-scheme: dark) {
+        :root,
+        body {
+          background: #17191b;
+          color: #e8eaed;
+        }
+        p,
+        .lede,
+        figcaption,
+        .stats div:nth-child(odd),
+        .legend-note,
+        .controls label,
+        .panel h2,
+        .legend-labels {
+          color: #aeb4bd;
+        }
+        .controls,
+        figure,
+        .panel {
+          background: #232629;
+          border-color: #3b4046;
+        }
+        select {
+          background: #2c3034;
+          color: #e8eaed;
+          border-color: #4a5057;
+        }
+        canvas {
+          background: #1d1f21;
+        }
+        .legend-bar {
+          border-color: #4a5057;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <h1>Thickness heatmap</h1>
+        <p class="lede">
+          A standalone preview of the Fontra plugin. The right-hand glyph shows
+          measured stroke thickness compared with a Noordzij-style pen model.
+          This demo rasterizes a browser font; the actual plugin measures the
+          live outline in Fontra.
+        </p>
+      </header>
+
+      <section class="controls">
+        <label>
+          Glyph
+          <select id="glyph">
+            <option value="B">B — serif</option>
+            <option value="S">S — serif</option>
+            <option value="O">O — serif</option>
+            <option value="H">H — sans</option>
+            <option value="n">n — serif</option>
+          </select>
+        </label>
+        <label>
+          Model
+          <select id="model">
+            <option value="translation">Translation (broad nib)</option>
+            <option value="expansion">Expansion (pointed pen)</option>
+            <option value="monoline">Monoline</option>
+          </select>
+        </label>
+        <label id="angle-label">
+          Pen angle
+          <input id="angle" type="range" min="0" max="80" step="1" value="30" />
+        </label>
+        <label id="horizontal-label">
+          Horizontal thickness
+          <input id="horizontal" type="range" min="5" max="300" step="1" value="35" />
+        </label>
+        <label>
+          Show
+          <select id="display">
+            <option value="deviation">Deviation from model</option>
+            <option value="target">Model target</option>
+            <option value="measured">Measured</option>
+            <option value="outliers">Outliers only</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="canvases">
+        <figure>
+          <canvas id="original" width="800" height="800"></canvas>
+          <figcaption id="original-caption">Original outline</figcaption>
+        </figure>
+        <figure>
+          <canvas id="heatmap" width="800" height="800"></canvas>
+          <figcaption id="heatmap-caption">Deviation from model</figcaption>
+        </figure>
+      </section>
+
+      <section class="info">
+        <div class="panel">
+          <h2>Legend</h2>
+          <div class="legend-bar" id="legend-bar"></div>
+          <div class="legend-labels" id="legend-labels">
+            <span></span><span></span><span></span>
+          </div>
+          <div class="legend-note" id="legend-note"></div>
+        </div>
+        <div class="panel">
+          <h2>Glyph summary</h2>
+          <div class="stats" id="stats"></div>
+        </div>
+      </section>
+
+      <p class="lede">
+        This is a lens, not a judge. Bowls and spines are often deliberately
+        lighter or heavier than stems. Use the tolerance band to separate an
+        intentional optical correction from a thickness you may not have
+        intended.
+      </p>
+    </div>
+
+    <script type="module" src="./demo.js?v=13"></script>
+  </body>
+</html>
