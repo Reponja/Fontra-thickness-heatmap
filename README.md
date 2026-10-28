@@ -27,6 +27,18 @@ appearance menu without closing the panel.
 To run the plugin from a local server instead, serve this repository at a URL
 (such as `http://localhost:8000`) and add that URL in the plugin manager.
 
+The plugin is self-contained: it does not import Fontra’s internal modules.
+Fontra’s built client ships webpack bundles, so paths such as
+`/editor/visualization-layer-definitions.js` do not exist on the server. A
+plugin that imports `fontra/...` gets a 404 that the browser reports as a
+disallowed MIME type (`text/plain`). This plugin talks to the editor through
+the controller API instead, so it works with bundled Fontra builds, including
+Fontra Pak.
+
+If Fontra still runs an older copy after an update, the CDN is serving a cached
+commit. Reinstall the plugin in the plugin manager, or wait for the jsDelivr
+cache to expire.
+
 ## How to read the map
 
 - **Cool / blue** — the drawing is thinner than the model at that point.
@@ -181,6 +193,9 @@ developing the color maps.
 - `src/colormap.js` — diverging/sequential color maps, legends, and RGBA output.
 - `src/engine.js` — browser rasterization, caching, and Fontra-facing analysis.
 - `src/panel.js` — the sidebar controls, legend, and glyph summary.
+- `src/ui.js` — self-contained UI primitives (panel base, DOM helpers, and
+  settings persistence) so the plugin does not depend on Fontra’s internal
+  module paths.
 - `demo/` — standalone browser preview.
 - `test/` — Node tests for model math and synthetic masks.
 

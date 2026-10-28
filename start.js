@@ -1,12 +1,8 @@
-import {
-  glyphSelector,
-  registerVisualizationLayerDefinition,
-  visualizationLayerDefinitions,
-} from "fontra/editor/visualization-layer-definitions.js";
-
 import { LAYER_ID, PANEL_IDENTIFIER } from "./src/constants.js";
 import { thicknessEngine } from "./src/engine.js";
 import ThicknessHeatmapPanel from "./src/panel.js";
+
+const LAYER_Z_INDEX = 300;
 
 export function start(editorController, pluginPath) {
   ThicknessHeatmapPanel.prototype.iconPath = `${pluginPath}/icon.svg`;
@@ -31,14 +27,33 @@ export function start(editorController, pluginPath) {
     }
   }
 
-  if (!visualizationLayerDefinitions.some((layer) => layer.identifier === LAYER_ID)) {
-    registerVisualizationLayerDefinition({
+  // Register the visualization layer directly on the controller's layer list.
+  //
+  // Fontra's built client is a webpack bundle and does not serve the
+  // individual modules that its `fontra/` import map points at, so importing
+  // `fontra/editor/visualization-layer-definitions.js` from a plugin fails
+  // with a 404 (reported as a disallowed MIME type). The definitions array and
+  // the selection context are stable parts of the controller API, so we can
+  // register without importing anything.
+  const layers = editorController.visualizationLayers;
+  const definitions = layers?.definitions;
+  if (!definitions) {
+    console.warn(
+      "Thickness heatmap: editorController.visualizationLayers is unavailable; " +
+        "the overlay layer was not registered."
+    );
+    return;
+  }
+
+  if (!definitions.some((layer) => layer.identifier === LAYER_ID)) {
+    const definition = {
       identifier: LAYER_ID,
       name: "Thickness heatmap",
-      selectionFunc: glyphSelector("editing"),
+      selectionFunc: (visContext) =>
+        visContext.glyphsBySelectionMode?.editing ?? [],
       userSwitchable: true,
       defaultOn: true,
-      zIndex: 300,
+      zIndex: LAYER_Z_INDEX,
       draw: ({ context, positionedGlyph }) => {
         const settings = panel.controller.model;
         const analysis = thicknessEngine.getAnalysis(positionedGlyph, settings);
@@ -61,16 +76,27 @@ export function start(editorController, pluginPath) {
         );
         context.restore();
       },
-    });
+    };
+
+    let index = definitions.findIndex(
+      (layer) => (layer.zIndex ?? 0) > LAYER_Z_INDEX
+    );
+    if (index < 0) {
+      index = definitions.length;
+    }
+    definitions.splice(index, 0, definition);
   }
 
   // The visualization-layers object was created before this plugin registered
   // its layer, so make sure the new layer is both visible and included in the
   // next layer build.
-  const layers = editorController.visualizationLayers;
-  if (layers) {
+  if (layers.visibleLayerIds) {
     layers.visibleLayerIds = new Set([...layers.visibleLayerIds, LAYER_ID]);
   }
-  editorController.visualizationLayersSettings.model[LAYER_ID] = true;
-  editorController.canvasController.requestUpdate();
+  const settingsModel = editorController.visualizationLayersSettings?.model;
+  if (settingsModel) {
+    settingsModel[LAYER_ID] = true;
+  }
+  layers.requestUpdate?.();
+  editorController.canvasController?.requestUpdate();
 }

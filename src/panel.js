@@ -1,5 +1,6 @@
-import Panel from "fontra/editor/panel.js";
 import {
+  ObservableController,
+  Panel,
   button,
   details,
   div,
@@ -9,8 +10,7 @@ import {
   select,
   span,
   summary,
-} from "fontra/core/html-utils.js";
-import { ObservableController } from "fontra/core/observable-object.js";
+} from "./ui.js";
 
 import { DEFAULT_SETTINGS, MODEL_TYPES, modelLabel, normalizeSettings } from "./core.js";
 import {
