@@ -45,7 +45,8 @@ const DEFAULT_STATE = path.join(
 const PURGE_BASE = "https://purge.jsdelivr.net/gh";
 const CDN_BASE = "https://cdn.jsdelivr.net/gh";
 const SEMVER_RE = /^v?(\d+)\.(\d+)\.(\d+)$/i;
-const DEFAULT_DELAY_MS = 120;
+const DEFAULT_DELAY_MS = 250;
+const DEFAULT_THROTTLE_DELAY_MS = 20000;
 const DEFAULT_TIMEOUT_MS = 20000;
 const DEFAULT_RETRIES = 2;
 
@@ -61,7 +62,8 @@ function usage() {
     "",
     "jsDelivr can only purge semver releases, not branches. If the pushed commit",
     "has no semver tag, this script creates the next patch tag (for example",
-    "v1.0.1), pushes it, and purges @latest plus that tag.",
+    "v1.0.1), pushes it, and purges that release. It refreshes the @latest alias",
+    "root once so new visitors resolve to the release.",
     "",
     "Options:",
     "  --root <dir>      Folder containing plugin repositories (default: parent of this repo)",
@@ -70,12 +72,13 @@ function usage() {
     "  --force           Purge plugin.json even when no files changed",
     "  --tag <version>   Use this semver tag instead of the next patch version",
     "  --no-tag          Do not create or push tags (branch @latest cannot be purged)",
-    "  --refs <list>     Comma-separated jsDelivr refs (default: latest,<release tag>)",
+    "  --refs <list>     Comma-separated jsDelivr refs (default: <release tag>)",
     "  --state <file>    State file (default: %LOCALAPPDATA%\\FontraPluginPurge\\state.json)",
     "  --no-state        Do not read or write state; purge files from the last commit",
-    "  --delay <ms>      Delay between purge requests (default: 120)",
+    "  --delay <ms>      Delay between purge requests (default: 250)",
+    "  --throttle-delay <ms>  First wait after jsDelivr throttles a batch (default: 20000)",
     "  --timeout <ms>    Per-request timeout (default: 20000)",
-    "  --retries <n>     Retries for throttled or failed requests (default: 2)",
+    "  --retries <n>     Retry rounds for throttled requests (default: 2)",
     "  --dry-run         Print what would be purged without tagging or sending requests",
     "  --list            List discovered plugin repositories and exit",
     "  --verbose         Print every purge URL",
@@ -97,6 +100,7 @@ function parseArgs(argv) {
     refs: null,
     noState: false,
     delay: DEFAULT_DELAY_MS,
+    throttleDelay: DEFAULT_THROTTLE_DELAY_MS,
     timeout: DEFAULT_TIMEOUT_MS,
     retries: DEFAULT_RETRIES,
     dryRun: false,
@@ -141,6 +145,10 @@ function parseArgs(argv) {
       options.delay = Number(argv[++i]);
     } else if (arg.startsWith("--delay=")) {
       options.delay = Number(arg.slice("--delay=".length));
+    } else if (arg === "--throttle-delay") {
+      options.throttleDelay = Number(argv[++i]);
+    } else if (arg.startsWith("--throttle-delay=")) {
+      options.throttleDelay = Number(arg.slice("--throttle-delay=".length));
     } else if (arg === "--timeout") {
       options.timeout = Number(argv[++i]);
     } else if (arg.startsWith("--timeout=")) {
@@ -164,6 +172,9 @@ function parseArgs(argv) {
 
   if (!Number.isFinite(options.delay) || options.delay < 0) {
     throw new Error("--delay must be a non-negative number.");
+  }
+  if (!Number.isFinite(options.throttleDelay) || options.throttleDelay < 1000) {
+    throw new Error("--throttle-delay must be at least 1000 ms.");
   }
   if (!Number.isFinite(options.timeout) || options.timeout < 1000) {
     throw new Error("--timeout must be at least 1000 ms.");
@@ -402,6 +413,17 @@ function fileExistsAtCommit(dir, commit, file) {
   return gitSucceeds(dir, ["cat-file", "-e", `${commit}:${file}`]);
 }
 
+function fileContentAtCommit(dir, commit, file) {
+  try {
+    return execFileSync("git", ["-C", dir, "show", `${commit}:${file}`], {
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: 10 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+}
+
 function encodePath(file) {
   return file
     .split("/")
@@ -430,6 +452,56 @@ function buildPurgeUrls(fullName, refs, files) {
     }
   }
   return urls;
+}
+
+function findFileForUrl(url, files) {
+  let best = null;
+  for (const file of files) {
+    const encoded = encodePath(file);
+    if (
+      url.endsWith(`/${encoded}`) &&
+      (!best || encoded.length > best.encoded.length)
+    ) {
+      best = { file, encoded };
+    }
+  }
+  return best?.file ?? null;
+}
+
+async function verifyCdnFile(url, expected, options) {
+  if (!expected) {
+    return { ok: false, message: "file is missing from the pushed commit" };
+  }
+  const cdnUrl = url.replace(PURGE_BASE, CDN_BASE);
+  try {
+    const response = await fetch(cdnUrl, {
+      headers: {
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "User-Agent": "fontra-plugin-purge/2.0",
+      },
+      signal: AbortSignal.timeout(options.timeout),
+    });
+    if (response.status === 403) {
+      // jsDelivr deliberately refuses some file types (for example .cmd). The
+      // file exists in the commit but can never be served or verified.
+      return {
+        ok: false,
+        unserved: true,
+        message: "jsDelivr does not serve this file type",
+      };
+    }
+    if (!response.ok) {
+      return { ok: false, message: `CDN returned ${response.status}` };
+    }
+    const actual = Buffer.from(await response.arrayBuffer());
+    if (Buffer.compare(expected, actual) === 0) {
+      return { ok: true, verified: true };
+    }
+    return { ok: false, message: "CDN still serves different content" };
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
 }
 
 function delay(milliseconds) {
@@ -476,14 +548,14 @@ async function purgeUrl(url, options) {
         data?.paths &&
         Object.values(data.paths).some((entry) => entry && entry.throttled);
       if (throttled) {
-        if (attempt < options.retries) {
-          await delay(1000 * 2 ** attempt);
-          continue;
-        }
+        // Let the caller retry the whole batch after a longer pause. Retrying
+        // every URL individually here both blocks for minutes and keeps the
+        // burst rate high enough that the next URLs are throttled too.
         return {
           ok: false,
           status: response.status,
           message: "throttled by jsDelivr",
+          throttled: true,
         };
       }
 
@@ -651,11 +723,10 @@ function resolveRefs(options, tag) {
   if (options.refs) {
     return options.refs;
   }
-  const refs = ["latest"];
-  if (tag) {
-    refs.push(tag);
-  }
-  return refs;
+  // jsDelivr shields every file under the resolved release, so purging the
+  // exact tag is enough. Asking for @latest/<file> as well doubles the request
+  // count and is what triggers jsDelivr's throttling.
+  return tag ? [tag] : ["latest"];
 }
 
 async function processRepo(dir, options, state) {
@@ -792,7 +863,17 @@ async function processRepo(dir, options, state) {
   files = [...new Set(files)].filter((file) => file && !file.endsWith("/"));
 
   const refs = resolveRefs(options, release.tag);
+  const aliasRootUrl =
+    release.tag && !options.refs
+      ? `${purgeBase(info.fullName, "latest")}/`
+      : null;
   const urls = buildPurgeUrls(info.fullName, refs, files);
+  if (aliasRootUrl) {
+    urls.push(aliasRootUrl);
+  }
+  const refsLabel = aliasRootUrl
+    ? `${refs.join(", ")} + latest root`
+    : refs.join(", ");
 
   console.log(
     `  files:   ${files.length} (${
@@ -800,7 +881,7 @@ async function processRepo(dir, options, state) {
     })`
   );
   console.log(
-    `  refs:    ${refs.join(", ")}  requests: ${urls.length}${
+    `  refs:    ${refsLabel}  requests: ${urls.length}${
       options.dryRun ? " (dry run)" : ""
     }`
   );
@@ -819,32 +900,104 @@ async function processRepo(dir, options, state) {
   let succeeded = 0;
   const skipped = [];
   const failed = [];
+  let pending = urls;
 
-  for (const url of urls) {
-    const result = await purgeUrl(url, options);
-    if (result.ok) {
-      succeeded++;
-    } else if (result.status === 404) {
-      skipped.push({ url, message: result.message });
+  for (let round = 0; ; round++) {
+    const next = [];
+    for (let i = 0; i < pending.length; i++) {
+      const url = pending[i];
+      const result = await purgeUrl(url, options);
+      if (result.ok) {
+        succeeded++;
+      } else if (result.status === 404) {
+        skipped.push({ url, message: result.message });
+      } else if (result.throttled && round < options.retries) {
+        next.push(url);
+      } else {
+        failed.push({
+          url,
+          message: result.message,
+          status: result.status,
+          throttled: !!result.throttled,
+        });
+      }
+      if (options.verbose) {
+        const label = result.ok
+          ? "ok"
+          : result.status === 404
+            ? "skip"
+            : result.throttled
+              ? "wait"
+              : "FAIL";
+        console.log(`    ${label} ${url}`);
+      }
+      if (options.delay > 0 && i < pending.length - 1) {
+        await delay(options.delay);
+      }
+    }
+
+    if (!next.length) {
+      break;
+    }
+
+    pending = next;
+    const waitMs = options.throttleDelay * 2 ** round;
+    console.log(
+      `  throttle: jsDelivr paused ${pending.length} request${
+        pending.length === 1 ? "" : "s"
+      }; waiting ${Math.round(waitMs / 1000)}s...`
+    );
+    await delay(waitMs);
+  }
+
+  // A throttled purge request does not mean the CDN is stale. Check the bytes
+  // jsDelivr actually serves before reporting a failure, so a run is not
+  // marked failed (and state is not held back) when the content is current.
+  let alreadyCurrent = 0;
+  let unserved = 0;
+  const pendingRoots = [];
+  const realFailed = [];
+  for (const entry of failed) {
+    if (!entry.throttled) {
+      realFailed.push(entry);
+      continue;
+    }
+    if (entry.url.endsWith("/")) {
+      // Directory roots have no file content to compare; verifyLatest() below
+      // confirms whether @latest already resolves to the release.
+      pendingRoots.push(entry);
+      continue;
+    }
+    const file = findFileForUrl(entry.url, files);
+    const expected = file ? fileContentAtCommit(dir, target, file) : null;
+    const check = await verifyCdnFile(entry.url, expected, options);
+    if (check.ok) {
+      alreadyCurrent++;
+      if (options.verbose) {
+        console.log(`    current ${entry.url}`);
+      }
+    } else if (check.unserved) {
+      unserved++;
+      if (options.verbose) {
+        console.log(`    not served ${entry.url}`);
+      }
     } else {
-      failed.push({ url, message: result.message, status: result.status });
-    }
-    if (options.verbose) {
-      const label = result.ok ? "ok" : result.status === 404 ? "skip" : "FAIL";
-      console.log(`    ${label} ${url}`);
-    }
-    if (options.delay > 0 && url !== urls[urls.length - 1]) {
-      await delay(options.delay);
+      realFailed.push({
+        ...entry,
+        message: `${entry.message}; ${check.message}`,
+      });
     }
   }
 
+  const currentNote = alreadyCurrent ? `, ${alreadyCurrent} already current` : "";
+  const unservedNote = unserved ? `, ${unserved} not served by jsDelivr` : "";
   console.log(
-    `  result:  ${succeeded} purged, ${skipped.length} skipped, ${failed.length} failed`
+    `  result:  ${succeeded} purged${currentNote}${unservedNote}, ${skipped.length} skipped, ${realFailed.length} failed`
   );
   for (const entry of skipped.slice(0, 5)) {
     console.log(`    skipped 404: ${entry.url}`);
   }
-  for (const entry of failed.slice(0, 10)) {
+  for (const entry of realFailed.slice(0, 10)) {
     console.log(
       `    failed ${entry.status || ""}: ${entry.url} — ${entry.message || ""}`
     );
@@ -852,12 +1005,12 @@ async function processRepo(dir, options, state) {
   if (skipped.length > 5) {
     console.log(`    ... and ${skipped.length - 5} more 404s`);
   }
-  if (failed.length > 10) {
-    console.log(`    ... and ${failed.length - 10} more failures`);
+  if (realFailed.length > 10) {
+    console.log(`    ... and ${realFailed.length - 10} more failures`);
   }
 
-  if (failed.length > 0) {
-    return { ok: false, failed: failed.length };
+  if (realFailed.length > 0) {
+    return { ok: false, failed: realFailed.length };
   }
 
   if (!release.tag) {
@@ -902,6 +1055,13 @@ async function processRepo(dir, options, state) {
   console.log(
     `  verify:  @latest resolves to ${verified.version} (${verified.type})`
   );
+  if (pendingRoots.length) {
+    console.log(
+      `  note:    ${pendingRoots.length} throttled root request${
+        pendingRoots.length === 1 ? "" : "s"
+      } already resolved to ${release.tag}.`
+    );
+  }
 
   if (!options.noState) {
     state.repos[info.fullName] = {

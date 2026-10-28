@@ -42,13 +42,21 @@ The workflow is:
 - If the pushed commit has no semver tag, creates the next patch tag (for
   example `v1.0.0`, then `v1.0.1`) at the **pushed** commit and pushes the tag.
   This is what makes `@latest` purgeable.
-- Purges both `@latest` and the exact release tag.
+- Purges the exact release tag (the cache entry that `@latest` resolves to) and
+  refreshes the `@latest` alias root once.
 - On the first run for a repository, purges **all tracked files**. That also
   clears caches left over from before you used this helper.
 - On later runs, purges only the files changed since the last successful purge.
   `plugin.json` is always included.
+- If jsDelivr starts throttling a batch, pauses and retries the throttled
+  requests instead of reporting them as failures. If a request is still
+  throttled after the retries, the helper downloads the file from the CDN and
+  compares it with the pushed commit. Matching bytes count as **already
+  current** rather than a failure, and file types jsDelivr refuses to serve
+  (such as `.cmd`) are reported as **not served** instead of failing the run.
 - After purging, checks the `x-jsd-version` header from jsDelivr and confirms
-  that `@latest` really resolves to the new release.
+  that `@latest` really resolves to the new release. A throttled `@latest` alias
+  root is considered current once that check passes.
 
 State is kept in:
 
@@ -63,6 +71,12 @@ the tagging step. If a repository has no upstream branch, it is skipped.
 New tags can take a few minutes to appear in jsDelivr’s release list. If the
 verification step says that, wait a bit and run the script again. It will reuse
 the same tag and retry the purge.
+
+If a run reports throttled requests, the helper waits and retries them as a
+batch, then verifies the CDN content directly. Throttling usually clears within
+a minute or two, and content that is already current is reported separately
+rather than as a failure. You do not need to change the tag or push another
+commit.
 
 ## Options
 
@@ -85,12 +99,15 @@ node tools/purge-jsdelivr.mjs Reponja/Fontra-thickness-heatmap
   already have semver releases, or for a best-effort branch purge.
 - `--since <commit>` — purge files changed since a specific commit.
 - `--force` — purge `plugin.json` even when nothing changed.
-- `--refs latest,1.2.3` — override the jsDelivr refs.
+- `--refs latest,1.2.3` — override the jsDelivr refs. By default the helper
+  purges only the resolved release tag, plus the `@latest` alias root.
 - `--root <dir>` — folder containing the plugin repositories.
 - `--state <file>` / `--no-state` — use a different state file, or none.
-- `--delay <ms>` — delay between requests (default `120`).
+- `--delay <ms>` — delay between requests (default `250`).
+- `--throttle-delay <ms>` — first pause after jsDelivr throttles a batch
+  (default `20000`; each retry round doubles it).
 - `--timeout <ms>` — per-request timeout (default `20000`).
-- `--retries <n>` — retries for throttled or failed requests (default `2`).
+- `--retries <n>` — retry rounds for throttled requests (default `2`).
 - `--verbose` — print every purge URL and result.
 - `owner/repo ...` — limit the run to those repositories.
 
