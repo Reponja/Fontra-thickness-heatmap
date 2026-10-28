@@ -26,9 +26,10 @@ appearance menu without closing the panel.
 
 Plugins stay installed from GitHub. If Fontra keeps loading an older copy after
 you push an update, that is jsDelivr’s cache, not a broken install. Run
-`tools\purge-jsdelivr.cmd`, then hard-reload Fontra with `Ctrl+Shift+R`. The
-helper clears the cache for **all** your local plugin repositories, not just
-this one. See [tools/README.md](tools/README.md).
+`tools\purge-jsdelivr.cmd` after pushing. It gives each plugin a semver release
+tag (required, because jsDelivr cannot purge branch-based `@latest`), purges all
+your local plugin repositories, and then reload Fontra. See
+[tools/README.md](tools/README.md).
 
 The plugin is self-contained: it does not import Fontra’s internal modules.
 Fontra’s built client ships webpack bundles, so paths such as
@@ -39,8 +40,10 @@ the controller API instead, so it works with bundled Fontra builds, including
 Fontra Pak.
 
 If Fontra still runs an older copy after an update, push first, then run
-`tools\purge-jsdelivr.cmd` and hard-reload Fontra (`Ctrl+Shift+R`). The purge
-helper also refreshes the other plugin repositories in the same folder.
+`tools\purge-jsdelivr.cmd`. It tags the pushed commit as a semver release,
+purges `@latest` and that tag on jsDelivr for all your plugins, and verifies the
+result. If a plugin still looks old in Fontra, use DevTools’ “Disable cache”
+reload.
 
 ## How to read the map
 
