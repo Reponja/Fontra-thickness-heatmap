@@ -24,8 +24,11 @@ right sidebar, and a visualization layer with the same name is enabled for the
 glyph being edited. The overlay can also be switched off from Fontra’s
 appearance menu without closing the panel.
 
-To run the plugin from a local server instead, serve this repository at a URL
-(such as `http://localhost:8000`) and add that URL in the plugin manager.
+Plugins stay installed from GitHub. If Fontra keeps loading an older copy after
+you push an update, that is jsDelivr’s cache, not a broken install. Run
+`tools\purge-jsdelivr.cmd`, then hard-reload Fontra with `Ctrl+Shift+R`. The
+helper clears the cache for **all** your local plugin repositories, not just
+this one. See [tools/README.md](tools/README.md).
 
 The plugin is self-contained: it does not import Fontra’s internal modules.
 Fontra’s built client ships webpack bundles, so paths such as
@@ -35,9 +38,9 @@ disallowed MIME type (`text/plain`). This plugin talks to the editor through
 the controller API instead, so it works with bundled Fontra builds, including
 Fontra Pak.
 
-If Fontra still runs an older copy after an update, the CDN is serving a cached
-commit. Reinstall the plugin in the plugin manager, or wait for the jsDelivr
-cache to expire.
+If Fontra still runs an older copy after an update, push first, then run
+`tools\purge-jsdelivr.cmd` and hard-reload Fontra (`Ctrl+Shift+R`). The purge
+helper also refreshes the other plugin repositories in the same folder.
 
 ## How to read the map
 
