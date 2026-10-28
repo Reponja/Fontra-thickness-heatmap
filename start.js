@@ -56,6 +56,9 @@ export function start(editorController, pluginPath) {
       zIndex: LAYER_Z_INDEX,
       draw: ({ context, positionedGlyph }) => {
         const settings = panel.controller.model;
+        if (settings.enabled === false) {
+          return;
+        }
         const analysis = thicknessEngine.getAnalysis(positionedGlyph, settings);
         if (!analysis) {
           return;
@@ -88,14 +91,22 @@ export function start(editorController, pluginPath) {
   }
 
   // The visualization-layers object was created before this plugin registered
-  // its layer, so make sure the new layer is both visible and included in the
-  // next layer build.
+  // its layer, so make sure the new layer is included in the next layer build.
+  // Respect the persisted on/off state instead of forcing the layer on every
+  // time Fontra starts.
+  const enabled = panel.controller.model.enabled !== false;
   if (layers.visibleLayerIds) {
-    layers.visibleLayerIds = new Set([...layers.visibleLayerIds, LAYER_ID]);
+    const next = new Set(layers.visibleLayerIds);
+    if (enabled) {
+      next.add(LAYER_ID);
+    } else {
+      next.delete(LAYER_ID);
+    }
+    layers.visibleLayerIds = next;
   }
   const settingsModel = editorController.visualizationLayersSettings?.model;
   if (settingsModel) {
-    settingsModel[LAYER_ID] = true;
+    settingsModel[LAYER_ID] = enabled;
   }
   layers.requestUpdate?.();
   editorController.canvasController?.requestUpdate();

@@ -24,6 +24,12 @@ right sidebar, and a visualization layer with the same name is enabled for the
 glyph being edited. The overlay can also be switched off from Fontra’s
 appearance menu without closing the panel.
 
+The panel’s **Show thickness heatmap** checkbox is the main on/off switch. It
+turns off analysis and drawing completely while keeping the panel and all of
+your settings available. The choice is remembered between Fontra sessions. The
+same state is reflected in Fontra’s appearance menu, so either switch keeps the
+other one in sync.
+
 Plugins stay installed from GitHub. If Fontra keeps loading an older copy after
 you push an update, that is jsDelivr’s cache, not a broken install. Run
 `tools\purge-jsdelivr.cmd` after pushing. It gives each plugin a semver release
@@ -52,7 +58,10 @@ reload.
 - **Neutral / faded** — the deviation is inside the tolerance band, or the
   measurement is low-confidence.
 - **Low-confidence areas** — stroke ends, sharp corners, junctions, serifs, and
-  hairlines. These are faded rather than treated as evidence of a mistake.
+  hairlines. In the deviation and outliers views they are faded rather than
+  treated as evidence of a mistake. The **model target** and **measured**
+  views are absolute readouts, so they show the nearest reliable measurement
+  in every inked pixel instead of leaving gaps.
 
 The default **tolerance band is ±5%**. Raise it if intentional optical
 corrections are dominating the map. The **glyph summary** reports the median
@@ -142,7 +151,10 @@ ordinary fill rule.
    pixels.
 7. Propagate widths from the nearest **confident** boundary sample, so an
    ambiguous junction cannot paint a fan of wrong values into the stroke
-   interior. Low-confidence samples still drive the fade field.
+   interior. Low-confidence samples still drive the fade field in the deviation
+   views. The absolute target and measured views use the same propagated values
+   and fall back to the nearest raw sample only where no confident sample
+   exists.
 8. Smooth the width field, and smooth stroke direction as a doubled-angle
    vector field. The model target is derived from that smoothed direction, so
    the target and deviation fields vary continuously across curves.
@@ -155,6 +167,8 @@ same analysis.
 ## Controls
 
 - **Model** — translation, expansion, or monoline.
+- **Show thickness heatmap** — turn the overlay and all measurement on or off.
+  The setting is remembered and stays in sync with Fontra’s appearance menu.
 - **Vertical thickness** — target for vertical stems, in font units.
 - **Horizontal thickness** — target for horizontal strokes in the expansion
   model. Diagonal targets blend smoothly between the two.
@@ -171,7 +185,10 @@ same analysis.
   measured views, so the control is hidden there.
 - **Overlay opacity** — how strongly the heatmap covers the glyph.
 - **Analysis detail** — raster resolution: fast, balanced, or fine.
-- **Fade low-confidence areas** — fades junctions, serifs, caps, and hairlines.
+- **Fade low-confidence areas** — fades junctions, serifs, caps, and hairlines
+  in the deviation and outliers views. It is disabled in the absolute target
+  and measured views, where every inked pixel shows its nearest reliable
+  measurement.
 - **Careful curve & junction measurement** — traces strokes from both sides and
   rejects chords across curves and junctions. Slower; turn it off for a quick
   read.
@@ -184,8 +201,10 @@ same analysis.
 - Thickness is measured perpendicular to the outline. Very sharp terminals,
   overlapping strokes, and hairline details can produce ambiguous local
   measurements; the confidence fade is there to keep those from driving the
-  statistics. Careful mode reduces false chords at curves and junctions, but it
-  cannot make an intentionally off-model stroke look on-model.
+  statistics in the deviation views. The absolute views still show the nearest
+  reliable value, and use the nearest raw sample only when a region has no
+  confident measurement at all. Careful mode reduces false chords at curves and
+  junctions, but it cannot make an intentionally off-model stroke look on-model.
 - Contrast letters such as **V** often have a deliberately thinner right side.
   That will still show as a deviation from a symmetric pen model; it is a
   property of the design, not a measurement failure.

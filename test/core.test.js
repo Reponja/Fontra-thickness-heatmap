@@ -159,6 +159,14 @@ test("normalization constrains UI values to safe ranges", () => {
   assert.equal(settings.quality, "balanced");
 });
 
+test("heatmap can be switched off without losing its other settings", () => {
+  assert.equal(normalizeSettings({}).enabled, true);
+  assert.equal(normalizeSettings({ enabled: false }).enabled, false);
+  assert.equal(normalizeSettings({ enabled: true }).enabled, true);
+  // Only an explicit false disables it; old or malformed values stay on.
+  assert.equal(normalizeSettings({ enabled: "false" }).enabled, true);
+});
+
 test("extractBoundary finds only edge pixels", () => {
   const width = 12;
   const height = 12;
@@ -446,10 +454,128 @@ test("tolerance band keeps small deviations neutral in deviation mode", () => {
   assert.ok(Math.max(...channels) - Math.min(...channels) < 20);
 });
 
+test("absolute display modes show measurements instead of confidence gaps", () => {
+  // The plus sign's inner corners have no confident sample at all. Deviation
+  // modes fade them, but measured and target modes should still show the
+  // propagated thickness.
+  const width = 160;
+  const height = 160;
+  const barWidth = 40;
+  const mask = makeMask(width, height);
+  fillRect(mask, width, 60, 20, 60 + barWidth, 140);
+  fillRect(mask, width, 20, 60, 140, 60 + barWidth);
+
+  const settings = {
+    modelType: "translation",
+    penAngle: 30,
+    baseThickness: barWidth,
+    tolerance: 5,
+    scaleRange: 25,
+    opacity: 0.8,
+    carefulMeasurement: true,
+  };
+  const analysis = analyzeMask(mask, width, height, settings, 1);
+
+  let hiddenPixel = -1;
+  for (let i = 0; i < mask.length; i++) {
+    if (
+      mask[i] &&
+      analysis.pixels.confidence[i] === 0 &&
+      analysis.pixels.actual[i] > 0
+    ) {
+      hiddenPixel = i;
+      break;
+    }
+  }
+  assert.notEqual(hiddenPixel, -1);
+  const offset = hiddenPixel * 4;
+
+  const measured = renderHeatmapRGBA(analysis, {
+    ...settings,
+    displayMode: "measured",
+    fadeLowConfidence: true,
+  });
+  const measuredPlain = renderHeatmapRGBA(analysis, {
+    ...settings,
+    displayMode: "measured",
+    fadeLowConfidence: false,
+  });
+  assert.ok(measured.data[offset + 3] > 0);
+  assert.deepEqual(measured.data, measuredPlain.data);
+
+  const deviationFade = renderHeatmapRGBA(analysis, {
+    ...settings,
+    displayMode: "deviation",
+    fadeLowConfidence: true,
+  });
+  const deviationPlain = renderHeatmapRGBA(analysis, {
+    ...settings,
+    displayMode: "deviation",
+    fadeLowConfidence: false,
+  });
+  let fadedPixels = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (
+      mask[i] &&
+      deviationFade.data[i * 4 + 3] !== deviationPlain.data[i * 4 + 3]
+    ) {
+      fadedPixels++;
+    }
+  }
+  assert.ok(fadedPixels > 100);
+});
+
+test("absolute modes fall back to the nearest raw sample", () => {
+  const analysis = {
+    width: 2,
+    height: 1,
+    mask: new Uint8Array([1, 1]),
+    pixels: {
+      actual: new Float32Array([0, 0]),
+      target: new Float32Array([0, 0]),
+      confidence: new Float32Array([0, 0]),
+      fallbackActual: new Float32Array([12, 18]),
+      fallbackTarget: new Float32Array([10, 15]),
+    },
+    stats: {
+      actualMin: 10,
+      actualMax: 20,
+      targetMin: 10,
+      targetMax: 20,
+    },
+  };
+
+  const measured = renderHeatmapRGBA(analysis, {
+    displayMode: "measured",
+    opacity: 1,
+  });
+  assert.ok(measured.data[3] > 0);
+  assert.ok(measured.data[7] > 0);
+
+  const target = renderHeatmapRGBA(analysis, {
+    displayMode: "target",
+    opacity: 1,
+  });
+  assert.ok(target.data[3] > 0);
+  assert.ok(target.data[7] > 0);
+
+  // Deviation mode still treats the same pixels as unreliable.
+  const deviation = renderHeatmapRGBA(analysis, {
+    displayMode: "deviation",
+    opacity: 1,
+  });
+  assert.equal(deviation.data[3], 0);
+  assert.equal(deviation.data[7], 0);
+});
+
 test("signatures ignore cosmetic settings but include analysis settings", () => {
   const settings = { baseThickness: 100, opacity: 0.5, quality: "balanced" };
   assert.equal(
     analysisSignature({ ...settings, opacity: 0.2 }),
+    analysisSignature(settings)
+  );
+  assert.equal(
+    analysisSignature({ ...settings, enabled: false }),
     analysisSignature(settings)
   );
   assert.notEqual(

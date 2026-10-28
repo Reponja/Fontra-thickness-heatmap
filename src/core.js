@@ -25,6 +25,7 @@ const CONFIDENCE_ACCEPT = 0.35;
 const CONFIDENCE_PROPAGATE = 0.5;
 
 export const DEFAULT_SETTINGS = {
+  enabled: true,
   modelType: "translation",
   baseThickness: 100,
   penAngle: 30,
@@ -66,6 +67,7 @@ export function normalizeSettings(settings = {}) {
   return {
     ...DEFAULT_SETTINGS,
     ...settings,
+    enabled: settings.enabled !== false,
     modelType,
     displayMode,
     baseThickness: Math.max(
@@ -595,6 +597,11 @@ function buildPixelMaps(analysis, mask, settings) {
   const actual = new Float32Array(n);
   const target = new Float32Array(n);
   const confidence = new Float32Array(n);
+  // Raw nearest-sample values, used by absolute display modes when an ink pixel
+  // has no confident sample at all. Deviation modes keep using the confident
+  // field and its confidence fade.
+  const fallbackActual = new Float32Array(n);
+  const fallbackTarget = new Float32Array(n);
   const actualWeighted = new Float64Array(n);
   const directionXWeighted = new Float64Array(n);
   const directionYWeighted = new Float64Array(n);
@@ -607,6 +614,12 @@ function buildPixelMaps(analysis, mask, settings) {
       continue;
     }
 
+    const rawIndex = analysis.nearestSample[index];
+    if (rawIndex >= 0) {
+      fallbackActual[index] = samples.actual[rawIndex];
+      fallbackTarget[index] = samples.target[rawIndex];
+    }
+
     // Widths come only from confidently measured boundary samples. Ambiguous
     // samples at junctions and terminals own large Voronoi wedges; letting them
     // supply values produced radial fans of wrong color.
@@ -616,7 +629,7 @@ function buildPixelMaps(analysis, mask, settings) {
         ? confidentIndex
         : settings.carefulMeasurement
           ? -1
-          : analysis.nearestSample[index];
+          : rawIndex;
     if (valueIndex < 0) {
       continue;
     }
@@ -624,8 +637,7 @@ function buildPixelMaps(analysis, mask, settings) {
     // The fade field still follows the plain nearest sample, so genuinely
     // uncertain regions fade no matter how far the nearest confident sample
     // is.
-    const fadeIndex = analysis.nearestSample[index];
-    const fadeSampleIndex = fadeIndex >= 0 ? fadeIndex : valueIndex;
+    const fadeSampleIndex = rawIndex >= 0 ? rawIndex : valueIndex;
     const sampleConfidence = samples.confidence[fadeSampleIndex];
 
     // In careful mode, ambiguous junction samples must not pull the smoothed
@@ -707,7 +719,7 @@ function buildPixelMaps(analysis, mask, settings) {
         : 0;
   }
 
-  return { actual, target, confidence };
+  return { actual, target, confidence, fallbackActual, fallbackTarget };
 }
 
 function median(values) {

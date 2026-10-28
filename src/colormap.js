@@ -111,18 +111,31 @@ export function renderHeatmapRGBA(analysis, settings) {
   const scaleRange = Math.max(s.scaleRange, 0.001);
   const [actualMin, actualMax] = normalizeRange(stats.actualMin, stats.actualMax);
   const [targetMin, targetMax] = normalizeRange(stats.targetMin, stats.targetMax);
+  const absoluteMode =
+    s.displayMode === "target" || s.displayMode === "measured";
 
   for (let pixel = 0; pixel < mask.length; pixel++) {
     if (!mask[pixel]) {
       continue;
     }
 
+    // Absolute modes are a measurement readout: every inked pixel should show
+    // the nearest reliable thickness, even where careful mode rejected the
+    // local chord. Confidence fading belongs to the deviation views.
     const confidence = pixels.confidence[pixel];
-    if (!(confidence > 0)) {
+    if (!absoluteMode && !(confidence > 0)) {
       continue;
     }
-    const actual = pixels.actual[pixel];
-    const target = pixels.target[pixel];
+    let actual = pixels.actual[pixel];
+    let target = pixels.target[pixel];
+    if (absoluteMode) {
+      if (!(actual > 0) && pixels.fallbackActual) {
+        actual = pixels.fallbackActual[pixel];
+      }
+      if (!(target > 0) && pixels.fallbackTarget) {
+        target = pixels.fallbackTarget[pixel];
+      }
+    }
     if (!(actual > 0) || !(target > 0)) {
       continue;
     }
@@ -132,7 +145,7 @@ export function renderHeatmapRGBA(analysis, settings) {
     let b;
     let alpha;
 
-    if (s.displayMode === "target" || s.displayMode === "measured") {
+    if (absoluteMode) {
       const measured = s.displayMode === "measured";
       const value = measured ? actual : target;
       const [min, max] = measured
@@ -166,7 +179,7 @@ export function renderHeatmapRGBA(analysis, settings) {
       }
     }
 
-    if (s.fadeLowConfidence) {
+    if (!absoluteMode && s.fadeLowConfidence) {
       const confidenceFactor = clamp(confidence / 0.45, 0, 1);
       const confidenceAlpha = 0.3 + 0.7 * confidenceFactor;
       alpha *= confidenceAlpha;

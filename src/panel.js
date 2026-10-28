@@ -19,7 +19,7 @@ import {
   sequentialGradientCSS,
 } from "./colormap.js";
 import { thicknessEngine } from "./engine.js";
-import { PANEL_IDENTIFIER } from "./constants.js";
+import { LAYER_ID, PANEL_IDENTIFIER } from "./constants.js";
 
 const DISPLAY_MODE_LABELS = {
   deviation: "Deviation from model",
@@ -186,6 +186,14 @@ export default class ThicknessHeatmapPanel extends Panel {
       margin: 0;
     }
 
+    .checkbox-row.enabled-row {
+      font-weight: 600;
+    }
+
+    .checkbox-row.disabled {
+      opacity: 0.55;
+    }
+
     .legend {
       display: flex;
       flex-direction: column;
@@ -287,6 +295,20 @@ export default class ThicknessHeatmapPanel extends Panel {
     this._updateStats(thicknessEngine.lastAnalysis);
     this._updateLegend();
     this._syncControls();
+
+    // Keep the panel checkbox in sync when the layer is switched from Fontra's
+    // own appearance menu.
+    this._layerSettingsListener = (event) => {
+      if (event.key !== LAYER_ID) {
+        return;
+      }
+      if (this.model.enabled !== event.newValue) {
+        this.model.enabled = event.newValue;
+      }
+    };
+    editorController?.visualizationLayersSettings?.addListener(
+      this._layerSettingsListener
+    );
   }
 
   get model() {
@@ -304,6 +326,26 @@ export default class ThicknessHeatmapPanel extends Panel {
     const title = div({ class: "title" }, ["Thickness heatmap"]);
     const subtitle = div({ class: "subtitle" }, [
       "Compare the drawing with a Noordzij-style pen model.",
+    ]);
+
+    const enabledCheckbox = input({
+      type: "checkbox",
+      id: "thickness-enabled",
+      checked: this.model.enabled !== false,
+      onchange: (event) => {
+        this.model.enabled = event.target.checked;
+      },
+    });
+    this._controls.enabledCheckbox = enabledCheckbox;
+
+    const enabledSection = div({ class: "panel-section" }, [
+      label({ class: "checkbox-row enabled-row" }, [
+        enabledCheckbox,
+        span({}, ["Show thickness heatmap"]),
+      ]),
+      div({ class: "help" }, [
+        "Turn this off to keep the panel and its settings but stop all measurement and drawing.",
+      ]),
     ]);
 
     const modelSelect = select(
@@ -577,6 +619,12 @@ export default class ThicknessHeatmapPanel extends Panel {
       format: (value) => `${fmt(value * 100, 0)}%`,
     });
 
+    this.fadeRow = label({ class: "checkbox-row" }, [
+      fadeCheckbox,
+      span({}, ["Fade low-confidence areas (junctions, serifs, hairlines)"]),
+    ]);
+    this.fadeHelp = div({ class: "help" }, []);
+
     const displaySection = div({ class: "panel-section" }, [
       div({ class: "section-heading" }, ["Display"]),
       div({ class: "field-row" }, [
@@ -594,10 +642,8 @@ export default class ThicknessHeatmapPanel extends Panel {
         label({ for: "thickness-quality" }, ["Analysis detail"]),
         qualitySelect,
       ]),
-      label({ class: "checkbox-row" }, [
-        fadeCheckbox,
-        span({}, ["Fade low-confidence areas (junctions, serifs, hairlines)"]),
-      ]),
+      this.fadeRow,
+      this.fadeHelp,
       label({ class: "checkbox-row" }, [
         carefulCheckbox,
         span({}, ["Careful curve & junction measurement (slower)"]),
@@ -652,8 +698,11 @@ export default class ThicknessHeatmapPanel extends Panel {
       summary({}, ["How to read this map"]),
       div({}, [
         "Cool colors mean thinner than the model; warm colors mean thicker. " +
-          "The tolerance band keeps small optical corrections faint and neutral, and uncertain " +
-          "junction/serif areas are faded or gray.",
+          "The tolerance band keeps small optical corrections faint and neutral. " +
+          "In deviation and outliers views, uncertain junction/serif areas fade back.",
+        "Measured and model target views are absolute readouts: every inked pixel shows " +
+          "the nearest reliable measurement, even where careful mode rejected the local " +
+          "chord. Low-confidence fading is off in those views.",
         "Careful mode checks each stroke from both sides, which rejects chords across " +
           "curves and junctions. It is slower; turn it off when you only need a quick read.",
         "This is a lens, not a judge. A bowl that is deliberately lighter than a stem, " +
@@ -664,6 +713,7 @@ export default class ThicknessHeatmapPanel extends Panel {
 
     const panel = div({ class: "heatmap-panel" }, [
       div({}, [div({ style: "display:none" }, [icon]), title, subtitle]),
+      enabledSection,
       modelSection,
       displaySection,
       legendSection,
@@ -717,6 +767,12 @@ export default class ThicknessHeatmapPanel extends Panel {
       return;
     }
     const settings = normalizeSettings(this.model);
+    const absoluteMode =
+      settings.displayMode === "target" || settings.displayMode === "measured";
+
+    if (this._controls.enabledCheckbox) {
+      this._controls.enabledCheckbox.checked = settings.enabled;
+    }
 
     for (const [key, slider] of Object.entries(this._sliders)) {
       slider.range.value = settings[key];
@@ -731,8 +787,7 @@ export default class ThicknessHeatmapPanel extends Panel {
     }
     if (this._controls.paletteSelect) {
       this._controls.paletteSelect.value = settings.palette;
-      this._controls.paletteSelect.disabled =
-        settings.displayMode === "target" || settings.displayMode === "measured";
+      this._controls.paletteSelect.disabled = absoluteMode;
     }
     if (this._controls.qualitySelect) {
       this._controls.qualitySelect.value = settings.quality;
@@ -764,6 +819,15 @@ export default class ThicknessHeatmapPanel extends Panel {
     }
     if (this._controls.fadeCheckbox) {
       this._controls.fadeCheckbox.checked = settings.fadeLowConfidence;
+      this._controls.fadeCheckbox.disabled = absoluteMode;
+    }
+    if (this.fadeRow) {
+      this.fadeRow.classList.toggle("disabled", absoluteMode);
+    }
+    if (this.fadeHelp) {
+      this.fadeHelp.textContent = absoluteMode
+        ? "Not used here: measured and target modes show the nearest reliable measurement in every inked pixel."
+        : "Low-confidence junctions, serifs, caps and hairlines fade back in deviation and outliers modes.";
     }
     if (this._controls.carefulCheckbox) {
       this._controls.carefulCheckbox.checked = settings.carefulMeasurement;
@@ -829,6 +893,41 @@ export default class ThicknessHeatmapPanel extends Panel {
     if (this._controls.paletteSelect?.closest(".field-row")) {
       this._controls.paletteSelect.closest(".field-row").style.display =
         deviationMode ? "grid" : "none";
+    }
+
+    this._applyLayerEnabled(settings.enabled);
+  }
+
+  _applyLayerEnabled(enabled) {
+    const value = enabled !== false;
+    const layers = this.editorController?.visualizationLayers;
+    const settingsModel =
+      this.editorController?.visualizationLayersSettings?.model;
+
+    // Fontra listens to its visualization-layer settings model and toggles the
+    // layer from there. Update both that model and the visible set, so a layer
+    // left visible by a hot reload is also switched off.
+    if (settingsModel && settingsModel[LAYER_ID] !== value) {
+      settingsModel[LAYER_ID] = value;
+    }
+    const visible = layers?.visibleLayerIds;
+    if (visible) {
+      const isVisible = visible.has(LAYER_ID);
+      if (isVisible !== value) {
+        const next = new Set(visible);
+        if (value) {
+          next.add(LAYER_ID);
+        } else {
+          next.delete(LAYER_ID);
+        }
+        layers.visibleLayerIds = next;
+      }
+    }
+
+    if (this._appliedEnabled !== value) {
+      this._appliedEnabled = value;
+      layers?.requestUpdate?.();
+      this.editorController?.canvasController?.requestUpdate();
     }
   }
 
