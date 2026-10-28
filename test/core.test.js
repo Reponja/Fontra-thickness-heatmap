@@ -42,6 +42,21 @@ function findSampleNear(samples, x, y, radius = 2) {
   return -1;
 }
 
+function samplesInBox(samples, xMin, yMin, xMax, yMax) {
+  const result = [];
+  for (let i = 0; i < samples.pointCount; i++) {
+    if (
+      samples.x[i] >= xMin &&
+      samples.x[i] <= xMax &&
+      samples.y[i] >= yMin &&
+      samples.y[i] <= yMax
+    ) {
+      result.push(i);
+    }
+  }
+  return result;
+}
+
 test("translation model normalizes a vertical stem to the base thickness", () => {
   const settings = {
     modelType: "translation",
@@ -57,20 +72,37 @@ test("translation model normalizes a vertical stem to the base thickness", () =>
   );
 });
 
-test("translation model supports a finite pen edge", () => {
+test("pen edge is the thinnest stroke as a fraction of vertical thickness", () => {
   const settings = {
     modelType: "translation",
     penAngle: 30,
-    translationMin: 0.1,
+    translationMin: 0.2,
   };
   const horizontal = modelThicknessFactor(settings, degToRad(0));
   const vertical = modelThicknessFactor(settings, degToRad(90));
-  const expected =
-    (0.1 + 0.9 * Math.sin(degToRad(30))) /
-    (0.1 + 0.9 * Math.sin(degToRad(60)));
+  const thinnest = modelThicknessFactor(settings, degToRad(30));
 
   assert.equal(vertical, 1);
-  assert.ok(Math.abs(horizontal - expected) < 1e-9);
+  assert.ok(Math.abs(thinnest - 0.2) < 1e-9);
+  assert.ok(Math.abs(horizontal - (0.2 + 0.8 * Math.tan(degToRad(30)))) < 1e-9);
+});
+
+test("pen edge can exceed 100 percent and reverse the contrast", () => {
+  const settings = normalizeSettings({
+    modelType: "translation",
+    penAngle: 30,
+    translationMin: 1.5,
+  });
+
+  assert.equal(settings.translationMin, 1.5);
+  assert.equal(modelThicknessFactor(settings, degToRad(90)), 1);
+  assert.equal(modelThicknessFactor(settings, degToRad(30)), 1.5);
+  assert.ok(
+    modelThicknessFactor(settings, degToRad(120)) <
+      modelThicknessFactor(settings, degToRad(90))
+  );
+
+  assert.equal(normalizeSettings({ translationMin: 100 }).translationMin, 10);
 });
 
 test("expansion uses vertical and horizontal targets directly", () => {
@@ -295,6 +327,125 @@ test("ambiguous samples do not leak extreme widths into the pixel map", () => {
   assert.ok(maxPixel < barWidth * 1.5);
 });
 
+test("careful measurement rejects caliper chords at an inner junction", () => {
+  const width = 160;
+  const height = 160;
+  const mask = makeMask(width, height);
+  fillRect(mask, width, 20, 20, 45, 130);
+  fillRect(mask, width, 20, 100, 120, 130);
+  fillRect(mask, width, 95, 20, 120, 130);
+
+  const settings = {
+    modelType: "translation",
+    penAngle: 30,
+    baseThickness: 25,
+  };
+  const fast = analyzeMask(
+    mask,
+    width,
+    height,
+    { ...settings, carefulMeasurement: false },
+    1
+  );
+  const careful = analyzeMask(
+    mask,
+    width,
+    height,
+    { ...settings, carefulMeasurement: true },
+    1
+  );
+
+  const junctionBox = [42, 95, 50, 101];
+  const fastMax = Math.max(
+    ...samplesInBox(fast.samples, ...junctionBox)
+      .filter((i) => fast.samples.confidence[i] >= 0.5)
+      .map((i) => fast.samples.actual[i])
+  );
+  const carefulMax = Math.max(
+    ...samplesInBox(careful.samples, ...junctionBox)
+      .filter((i) => careful.samples.confidence[i] >= 0.5)
+      .map((i) => careful.samples.actual[i])
+  );
+
+  // One-sided calipers see a 33-pixel chord across the junction; the
+  // two-sided check rejects it instead of painting a false hot spot.
+  assert.ok(fastMax >= 31);
+  assert.ok(carefulMax <= 30.5);
+
+  const stem = findSampleNear(careful.samples, 20, 60, 1);
+  assert.notEqual(stem, -1);
+  assert.ok(Math.abs(careful.samples.actual[stem] - 25) < 0.6);
+  assert.ok(careful.samples.confidence[stem] > 0.9);
+});
+
+test("careful measurement keeps curved ring widths stable", () => {
+  const width = 120;
+  const height = 120;
+  const mask = makeMask(width, height);
+  const cx = 60;
+  const cy = 60;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const distance = Math.hypot(x - cx, y - cy);
+      if (distance >= 30 && distance <= 50) {
+        mask[y * width + x] = 1;
+      }
+    }
+  }
+
+  const analysis = analyzeMask(
+    mask,
+    width,
+    height,
+    {
+      modelType: "expansion",
+      baseThickness: 20,
+      expansionHorizontal: 5,
+      carefulMeasurement: true,
+    },
+    1
+  );
+
+  const curved = samplesInBox(analysis.samples, 30, 10, 90, 60).filter(
+    (i) => analysis.samples.confidence[i] >= 0.5
+  );
+  assert.ok(curved.length > 20);
+  for (const i of curved) {
+    assert.ok(Math.abs(analysis.samples.actual[i] - 20) < 2.5);
+  }
+});
+
+test("tolerance band keeps small deviations neutral in deviation mode", () => {
+  const width = 60;
+  const height = 140;
+  const mask = makeMask(width, height);
+  fillRect(mask, width, 20, 20, 40, 120);
+  const settings = {
+    modelType: "monoline",
+    baseThickness: 20.4,
+    displayMode: "deviation",
+    opacity: 0.8,
+    scaleRange: 25,
+    carefulMeasurement: true,
+  };
+  const analysis = analyzeMask(mask, width, height, settings, 1);
+
+  const loose = renderHeatmapRGBA(analysis, { ...settings, tolerance: 5 });
+  const tight = renderHeatmapRGBA(analysis, { ...settings, tolerance: 0 });
+  const offset = (70 * width + 30) * 4;
+
+  // A 2% deviation is inside the 5% band: it should be faint and gray.
+  const looseAlpha = loose.data[offset + 3];
+  const tightAlpha = tight.data[offset + 3];
+  assert.ok(looseAlpha < tightAlpha * 0.5);
+  const channels = [
+    loose.data[offset],
+    loose.data[offset + 1],
+    loose.data[offset + 2],
+  ];
+  assert.ok(Math.max(...channels) - Math.min(...channels) < 20);
+});
+
 test("signatures ignore cosmetic settings but include analysis settings", () => {
   const settings = { baseThickness: 100, opacity: 0.5, quality: "balanced" };
   assert.equal(
@@ -307,6 +458,10 @@ test("signatures ignore cosmetic settings but include analysis settings", () => 
   );
   assert.notEqual(
     analysisSignature({ ...settings, expansionHorizontal: 45 }),
+    analysisSignature(settings)
+  );
+  assert.notEqual(
+    analysisSignature({ ...settings, carefulMeasurement: false }),
     analysisSignature(settings)
   );
   assert.notEqual(

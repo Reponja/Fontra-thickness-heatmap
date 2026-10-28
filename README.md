@@ -67,16 +67,22 @@ A broad nib held at a fixed angle. The nib angle selects the thin direction;
 the stroke gets thicker as it turns toward the nib’s broad axis.
 
 ```
-f(τ) = [m + (1 − m)·|sin(θ − τ)|] / [m + (1 − m)·|sin(θ − 90°)|]
+f(τ) = m + (1 − m) · |sin(θ − τ)| / |sin(θ − 90°)|
 ```
 
 - `θ` is the **pen angle**.
-- `m` is the residual **pen-edge thickness**.
+- `m` is the **pen-edge thickness** as a fraction of the vertical target.
 - `τ` is the local stroke direction, taken from the outline tangent.
 
+The pen edge is defined the way a designer thinks about it: with a 100-unit
+vertical target and a 20% pen edge, the thinnest stroke is 20 units. The slider
+stops at 100% (a square nib, which gives a monoline result), but the numeric
+field accepts higher values. Above 100% the contrast reverses: the direction
+parallel to the nib edge becomes thicker than the vertical stem.
+
 With a sharp nib (`m = 0`), a 30° pen angle predicts horizontal strokes at
-about 58% of the vertical stem thickness; the default 8% pen edge raises that
-to about 62%.
+about 58% of the vertical stem thickness. The default 8% pen edge raises that
+to about 61%.
 
 ### Expansion (pointed pen)
 
@@ -119,15 +125,22 @@ ordinary fill rule.
    with the normal at the opposite edge and with the distance to the medial
    axis; rays that run along a stroke end rather than across it are marked
    low-confidence.
-5. Smooth boundary samples spatially and fade sharp turns, which are usually
-   junctions, terminals, or corners.
-6. Propagate widths from the nearest **confident** boundary sample, so an
+5. In **careful mode**, trace the same stroke back from the opposite edge. A
+   real caliper returns to its starting point with a similar width; a chord
+   across a curve or a junction does not. The two widths are averaged to get
+   the middle ground between the left and right sides of the stroke. Mismatched
+   traces are faded instead of becoming false hot spots.
+6. Smooth boundary samples spatially and fade sharp turns, which are usually
+   junctions, terminals, or corners. Careful mode uses a wider corner window so
+   a junction is recognized even when its normals turn gradually over a few
+   pixels.
+7. Propagate widths from the nearest **confident** boundary sample, so an
    ambiguous junction cannot paint a fan of wrong values into the stroke
    interior. Low-confidence samples still drive the fade field.
-7. Smooth the width field, and smooth stroke direction as a doubled-angle
+8. Smooth the width field, and smooth stroke direction as a doubled-angle
    vector field. The model target is derived from that smoothed direction, so
    the target and deviation fields vary continuously across curves.
-8. Render the selected display mode.
+9. Render the selected display mode.
 
 A cached analysis keyed by the path and model settings keeps normal editing
 interactive. Cosmetic changes such as overlay opacity or display mode reuse the
@@ -139,15 +152,23 @@ same analysis.
 - **Vertical thickness** — target for vertical stems, in font units.
 - **Horizontal thickness** — target for horizontal strokes in the expansion
   model. Diagonal targets blend smoothly between the two.
+- **Pen edge thickness** — thinnest stroke as a percentage of the vertical
+  target. The slider stops at 100%; type a higher number for inverted contrast.
+  The panel shows the computed thinnest thickness in font units.
 - **Fit to glyph** — estimates vertical and horizontal targets from the current
   outline using medians, so one odd terminal does not decide the result.
 - **Show** — deviation, model target, measured thickness, or outliers only.
 - **Deviation colors** — blue/orange (colorblind-friendly) or classic blue/red.
 - **Color scale** — the deviation mapped to the strongest color.
-- **Tolerance band** — deviations inside this band remain neutral.
+- **Tolerance band** — deviations inside this band remain faint and neutral in
+  the deviation and outliers views. It has no effect on the absolute target and
+  measured views, so the control is hidden there.
 - **Overlay opacity** — how strongly the heatmap covers the glyph.
 - **Analysis detail** — raster resolution: fast, balanced, or fine.
 - **Fade low-confidence areas** — fades junctions, serifs, caps, and hairlines.
+- **Careful curve & junction measurement** — traces strokes from both sides and
+  rejects chords across curves and junctions. Slower; turn it off for a quick
+  read.
 
 ## Scope and limitations
 
@@ -157,7 +178,11 @@ same analysis.
 - Thickness is measured perpendicular to the outline. Very sharp terminals,
   overlapping strokes, and hairline details can produce ambiguous local
   measurements; the confidence fade is there to keep those from driving the
-  statistics.
+  statistics. Careful mode reduces false chords at curves and junctions, but it
+  cannot make an intentionally off-model stroke look on-model.
+- Contrast letters such as **V** often have a deliberately thinner right side.
+  That will still show as a deviation from a symmetric pen model; it is a
+  property of the design, not a measurement failure.
 - There is no automatic outline correction and no recommendation engine. The
   map is diagnostic.
 - Latin-style outlines are the initial focus; CJK and highly complex

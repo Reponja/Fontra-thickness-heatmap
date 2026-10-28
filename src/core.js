@@ -37,6 +37,7 @@ export const DEFAULT_SETTINGS = {
   quality: "balanced",
   palette: "accessible",
   fadeLowConfidence: true,
+  carefulMeasurement: true,
 };
 
 const DEG = Math.PI / 180;
@@ -75,7 +76,7 @@ export function normalizeSettings(settings = {}) {
     translationMin: clamp(
       finiteNumber(settings.translationMin, DEFAULT_SETTINGS.translationMin),
       0,
-      0.6
+      10
     ),
     expansionHorizontal: clamp(
       finiteNumber(
@@ -107,6 +108,7 @@ export function normalizeSettings(settings = {}) {
       ? settings.palette
       : DEFAULT_SETTINGS.palette,
     fadeLowConfidence: settings.fadeLowConfidence !== false,
+    carefulMeasurement: settings.carefulMeasurement !== false,
   };
 }
 
@@ -130,10 +132,18 @@ export function modelThicknessFactor(settings, tangentRad) {
   if (s.modelType === "translation") {
     const thinAngle = degToRad(s.penAngle);
     const min = s.translationMin;
-    const raw = (angle) =>
-      min + (1 - min) * Math.abs(Math.sin(thinAngle - angle));
-    const vertical = raw(Math.PI / 2);
-    return raw(tangentRad) / Math.max(vertical, 0.02);
+    // The user-facing meaning of "pen edge thickness" is the thinnest stroke
+    // as a fraction of the vertical target: 20% of a 100-unit stem is 20
+    // units. The projection onto the vertical direction keeps vertical stems
+    // at exactly 1.0, and makes a stroke parallel to the nib edge exactly
+    // `min`.
+    const verticalProjection = Math.max(
+      Math.abs(Math.sin(thinAngle - Math.PI / 2)),
+      0.02
+    );
+    const directional =
+      Math.abs(Math.sin(thinAngle - tangentRad)) / verticalProjection;
+    return min + (1 - min) * directional;
   }
 
   const verticalTarget = s.baseThickness;
@@ -406,10 +416,15 @@ function traceCaliper(mask, width, height, x, y, normal, distance) {
   const maxDistance = Math.hypot(width, height) + 2;
   let lastInside = 0;
   let maxRadius = 0;
+  let hitEdge = false;
 
   for (let t = step; t <= maxDistance; t += step) {
     const px = x + normal.x * t;
     const py = y + normal.y * t;
+    if (px < 0 || py < 0 || px > width - 1 || py > height - 1) {
+      hitEdge = true;
+      break;
+    }
     if (sampleMaskBilinear(mask, width, height, px, py) <= 0.5) {
       break;
     }
@@ -427,6 +442,88 @@ function traceCaliper(mask, width, height, x, y, normal, distance) {
     exitX: x + normal.x * (lastInside + 0.5),
     exitY: y + normal.y * (lastInside + 0.5),
     maxRadius,
+    hitEdge,
+  };
+}
+
+/**
+ * Trace the same stroke from the opposite boundary. A true caliper crosses the
+ * stroke and returns to its starting point; a chord that cuts across a curve or
+ * a junction does not. The two widths are averaged to get the "middle ground"
+ * between the two sides of the stroke.
+ */
+function traceBothSides(
+  mask,
+  width,
+  height,
+  coverage,
+  blurRadius,
+  x,
+  y,
+  normal,
+  forward,
+  distance
+) {
+  if (forward.hitEdge || forward.widthPx <= 1) {
+    return null;
+  }
+
+  const exitNormal = inwardNormalFromCoverage(
+    coverage,
+    width,
+    height,
+    forward.exitX,
+    forward.exitY,
+    blurRadius
+  );
+  if (!exitNormal) {
+    return null;
+  }
+
+  // Step half a pixel back inside along the forward direction so both traces
+  // start from comparable pixel centers; starting exactly on the boundary
+  // would bias the reverse width by half a pixel.
+  const reverse = traceCaliper(
+    mask,
+    width,
+    height,
+    forward.exitX - normal.x * 0.5,
+    forward.exitY - normal.y * 0.5,
+    exitNormal,
+    distance
+  );
+  if (reverse.hitEdge || reverse.widthPx <= 1) {
+    return null;
+  }
+
+  const maxWidth = Math.max(forward.widthPx, reverse.widthPx);
+  const widthAgreement =
+    maxWidth > 0
+      ? 1 - Math.abs(forward.widthPx - reverse.widthPx) / maxWidth
+      : 0;
+  const endpointDistance = Math.hypot(reverse.exitX - x, reverse.exitY - y);
+  const endpointTolerance = Math.max(3, 0.3 * maxWidth);
+  const endpointAgreement = clamp(
+    1 - Math.max(0, endpointDistance - 2) / endpointTolerance,
+    0,
+    1
+  );
+  const directionAgreement = clamp(
+    -(normal.x * exitNormal.x + normal.y * exitNormal.y),
+    0,
+    1
+  );
+
+  return {
+    exitNormal,
+    reverse,
+    widthPx: (forward.widthPx + reverse.widthPx) / 2,
+    agreement:
+      widthAgreement *
+      endpointAgreement *
+      (0.7 + 0.3 * directionAgreement),
+    widthAgreement,
+    endpointDistance,
   };
 }
 
@@ -513,10 +610,13 @@ function buildPixelMaps(analysis, mask, settings) {
     // Widths come only from confidently measured boundary samples. Ambiguous
     // samples at junctions and terminals own large Voronoi wedges; letting them
     // supply values produced radial fans of wrong color.
+    const confidentIndex = analysis.nearestConfidentSample[index];
     const valueIndex =
-      analysis.nearestConfidentSample[index] >= 0
-        ? analysis.nearestConfidentSample[index]
-        : analysis.nearestSample[index];
+      confidentIndex >= 0
+        ? confidentIndex
+        : settings.carefulMeasurement
+          ? -1
+          : analysis.nearestSample[index];
     if (valueIndex < 0) {
       continue;
     }
@@ -528,7 +628,14 @@ function buildPixelMaps(analysis, mask, settings) {
     const fadeSampleIndex = fadeIndex >= 0 ? fadeIndex : valueIndex;
     const sampleConfidence = samples.confidence[fadeSampleIndex];
 
-    const weight = 0.05 + sampleConfidence * sampleConfidence;
+    // In careful mode, ambiguous junction samples must not pull the smoothed
+    // direction field or the width field toward their chord measurement.
+    const valueConfidence = samples.confidence[valueIndex];
+    const weight = settings.carefulMeasurement
+      ? valueConfidence >= CONFIDENCE_PROPAGATE
+        ? valueConfidence * valueConfidence
+        : 0
+      : 0.05 + sampleConfidence * sampleConfidence;
     actual[index] = samples.actual[valueIndex];
     actualWeighted[index] = samples.actual[valueIndex] * weight;
 
@@ -736,8 +843,16 @@ function smoothBoundarySamples(
   settings
 ) {
   const smoothed = createSampleStore(samples.pointCount);
+  const careful = settings.carefulMeasurement;
   const radius = clamp(Math.round(Math.min(width, height) / 120), 3, 8);
-  const radiusSquared = radius * radius;
+  // A wider window is needed to notice that the two sides of a junction meet
+  // at a sharp angle. The smoothing radius itself stays small so ordinary
+  // curves are not flattened.
+  const cornerRadius = careful
+    ? clamp(Math.round(radius * 1.75), 6, 14)
+    : radius;
+  const scanRadius = Math.max(radius, cornerRadius);
+  const scanRadiusSquared = scanRadius * scanRadius;
 
   for (let i = 0; i < samples.pointCount; i++) {
     const x = samples.x[i];
@@ -754,35 +869,44 @@ function smoothBoundarySamples(
     let minDot = 1;
     const widths = [];
 
-    for (let yy = yi - radius; yy <= yi + radius; yy++) {
+    for (let yy = yi - scanRadius; yy <= yi + scanRadius; yy++) {
       if (yy < 0 || yy >= height) {
         continue;
       }
-      for (let xx = xi - radius; xx <= xi + radius; xx++) {
+      for (let xx = xi - scanRadius; xx <= xi + scanRadius; xx++) {
         if (xx < 0 || xx >= width) {
           continue;
         }
         const dx = xx - xi;
         const dy = yy - yi;
-        if (dx * dx + dy * dy > radiusSquared) {
+        const distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared > scanRadiusSquared) {
           continue;
         }
         const neighborIndex = boundaryToSample[yy * width + xx];
         if (neighborIndex < 0) {
           continue;
         }
+        const neighborConfidence = samples.confidence[neighborIndex];
         const dot = nx * samples.nx[neighborIndex] + ny * samples.ny[neighborIndex];
         minDot = Math.min(minDot, dot);
-        if (dot < 0.55) {
+        if (distanceSquared > radius * radius || dot < 0.55) {
           continue;
         }
-        widths.push(samples.actual[neighborIndex]);
-        const spatialWeight = 1 - (Math.hypot(dx, dy) / radius) * 0.55;
-        const weight =
-          spatialWeight * (0.2 + samples.confidence[neighborIndex]);
+        if (careful && neighborConfidence < 0.2) {
+          continue;
+        }
+        if (!careful || neighborConfidence >= CONFIDENCE_ACCEPT) {
+          widths.push(samples.actual[neighborIndex]);
+        }
+        const spatialWeight =
+          1 - (Math.sqrt(distanceSquared) / radius) * 0.55;
+        const weight = careful
+          ? spatialWeight * Math.max(0, neighborConfidence - 0.15)
+          : spatialWeight * (0.2 + neighborConfidence);
         sumNx += samples.nx[neighborIndex] * weight;
         sumNy += samples.ny[neighborIndex] * weight;
-        sumConfidence += samples.confidence[neighborIndex] * weight;
+        sumConfidence += neighborConfidence * weight;
         sumWeight += weight;
       }
     }
@@ -873,7 +997,7 @@ export function analyzeMask(mask, width, height, settings, scale) {
         continue;
       }
 
-      const trace = traceCaliper(
+      const forward = traceCaliper(
         mask,
         width,
         height,
@@ -882,14 +1006,55 @@ export function analyzeMask(mask, width, height, settings, scale) {
         normal,
         distance
       );
-      const exitNormal = inwardNormalFromCoverage(
-        coverage,
-        width,
-        height,
-        trace.exitX,
-        trace.exitY,
-        blurRadius
-      );
+
+      let exitNormal = null;
+      let actualWidthPx = forward.widthPx;
+      let agreement = forward.hitEdge ? 0 : 1;
+      let tangentNormalX = normal.x;
+      let tangentNormalY = normal.y;
+
+      if (normalized.carefulMeasurement) {
+        const both = traceBothSides(
+          mask,
+          width,
+          height,
+          coverage,
+          blurRadius,
+          x,
+          y,
+          normal,
+          forward,
+          distance
+        );
+        if (both) {
+          exitNormal = both.exitNormal;
+          actualWidthPx = both.widthPx;
+          agreement = both.agreement;
+
+          // The two boundary normals point in opposite directions across a
+          // perfect stroke. Their difference is a stable "middle ground"
+          // normal on curved strokes, where the two sides are not exactly
+          // parallel.
+          const midX = normal.x - both.exitNormal.x;
+          const midY = normal.y - both.exitNormal.y;
+          const midLength = Math.hypot(midX, midY);
+          if (midLength > 1e-6) {
+            tangentNormalX = midX / midLength;
+            tangentNormalY = midY / midLength;
+          }
+        } else {
+          agreement = 0;
+        }
+      } else {
+        exitNormal = inwardNormalFromCoverage(
+          coverage,
+          width,
+          height,
+          forward.exitX,
+          forward.exitY,
+          blurRadius
+        );
+      }
 
       let alignment = 0;
       if (exitNormal) {
@@ -904,25 +1069,28 @@ export function analyzeMask(mask, width, height, settings, scale) {
       // deepest point on it should be about half the measured width from the
       // boundary. Rays that graze along a stroke or a junction fail this test.
       const radialRatio =
-        trace.widthPx > 0 ? (2 * trace.maxRadius) / trace.widthPx : 0;
+        forward.widthPx > 0 ? (2 * forward.maxRadius) / forward.widthPx : 0;
       const medialConsistency = clamp((radialRatio - 0.55) / 0.35, 0, 1);
 
       // In a tight, thick bowl the boundary normals at the two ends of a
       // correct caliper converge; they are not exactly antiparallel, so the
       // alignment test is only a weak hint. The medial-depth test and the
-      // corner test below are the stronger signals.
+      // corner test below are the stronger signals. In careful mode the
+      // two-sided agreement test rejects chords that cross a curve or a
+      // junction.
       const confidence = clamp(
         (0.75 + 0.25 * alignment) *
           medialConsistency *
-          (0.6 + 0.4 * normal.strength),
+          (0.6 + 0.4 * normal.strength) *
+          agreement,
         0,
         1
       );
 
       // The inward normal runs across the stroke; the stroke itself runs
       // perpendicular to it.
-      const tangent = Math.atan2(normal.x, -normal.y);
-      const actual = trace.widthPx / Math.max(scale, 1e-6);
+      const tangent = Math.atan2(tangentNormalX, -tangentNormalY);
+      const actual = actualWidthPx / Math.max(scale, 1e-6);
       const target = normalized.baseThickness * modelThicknessFactor(normalized, tangent);
 
       boundaryToSample[index] = rawSamples.pointCount;
@@ -1044,7 +1212,7 @@ export function estimateBaseFromAnalysis(analysis) {
 export function analysisSignature(settings) {
   const s = normalizeSettings(settings);
   return [
-    "v2",
+    "v3",
     s.modelType,
     s.baseThickness.toFixed(4),
     s.penAngle.toFixed(3),
@@ -1052,6 +1220,7 @@ export function analysisSignature(settings) {
     s.expansionHorizontal.toFixed(4),
     s.tolerance.toFixed(3),
     s.quality,
+    s.carefulMeasurement ? "careful" : "fast",
   ].join("|");
 }
 

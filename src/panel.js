@@ -357,6 +357,41 @@ export default class ThicknessHeatmapPanel extends Panel {
     ]);
     baseInput.id = "thickness-base";
 
+    const penEdgeInput = input({
+      type: "number",
+      min: "0",
+      max: "1000",
+      step: "1",
+      value: fmt(this.model.translationMin * 100, 1).replace(/\.?0+$/, ""),
+      onchange: (event) => {
+        const percent = Number(event.target.value);
+        if (Number.isFinite(percent) && percent >= 0) {
+          this.model.translationMin = Math.min(10, percent / 100);
+        }
+        event.target.value = fmt(this.model.translationMin * 100, 1).replace(
+          /\.?0+$/,
+          ""
+        );
+      },
+    });
+    penEdgeInput.id = "thickness-pen-edge";
+    this._controls.penEdgeInput = penEdgeInput;
+
+    const penEdgeRange = input({
+      type: "range",
+      min: "0",
+      max: "1",
+      step: "0.01",
+      value: Math.min(this.model.translationMin, 1),
+      oninput: (event) => {
+        this.model.translationMin = Number(event.target.value);
+      },
+    });
+    this._controls.penEdgeRange = penEdgeRange;
+
+    const penEdgeEstimate = div({ class: "help" }, []);
+    this.penEdgeEstimate = penEdgeEstimate;
+
     const translationSection = div({ class: "controls-group" }, [
       this._makeSlider({
         key: "penAngle",
@@ -368,16 +403,17 @@ export default class ThicknessHeatmapPanel extends Panel {
         help:
           "Angle of the broad nib's thin direction. 0° gives vertical stems their full width; 30° is a classic calligraphic angle.",
       }),
-      this._makeSlider({
-        key: "translationMin",
-        label: "Pen edge thickness",
-        min: 0,
-        max: 0.5,
-        step: 0.01,
-        format: (value) => `${fmt(value * 100, 0)}%`,
-        help:
-          "The residual thickness when the stroke runs parallel to the nib edge. 0% is a perfectly sharp broad nib.",
-      }),
+      div({ class: "range-row" }, [
+        label({ class: "range-label", for: "thickness-pen-edge" }, [
+          "Pen edge thickness",
+        ]),
+        div({ class: "inline-buttons" }, [penEdgeInput, span({}, ["%"])]),
+      ]),
+      penEdgeRange,
+      div({ class: "help" }, [
+        "The thinnest stroke as a fraction of the vertical target. 100% is a square nib (monoline); above 100% reverses the contrast. The slider stops at 100%, but you can type higher values.",
+      ]),
+      penEdgeEstimate,
     ]);
     this.translationSection = translationSection;
 
@@ -500,6 +536,16 @@ export default class ThicknessHeatmapPanel extends Panel {
     });
     this._controls.fadeCheckbox = fadeCheckbox;
 
+    const carefulCheckbox = input({
+      type: "checkbox",
+      id: "thickness-careful",
+      checked: this.model.carefulMeasurement,
+      onchange: (event) => {
+        this.model.carefulMeasurement = event.target.checked;
+      },
+    });
+    this._controls.carefulCheckbox = carefulCheckbox;
+
     this.toleranceSection = this._makeSlider({
       key: "tolerance",
       label: "Tolerance band",
@@ -552,6 +598,13 @@ export default class ThicknessHeatmapPanel extends Panel {
         fadeCheckbox,
         span({}, ["Fade low-confidence areas (junctions, serifs, hairlines)"]),
       ]),
+      label({ class: "checkbox-row" }, [
+        carefulCheckbox,
+        span({}, ["Careful curve & junction measurement (slower)"]),
+      ]),
+      div({ class: "help" }, [
+        "Careful mode traces each stroke from both sides and rejects chords across curves and junctions. Turn it off for faster redraws.",
+      ]),
     ]);
     displaySelect.id = "thickness-display";
     paletteSelect.id = "thickness-palette";
@@ -599,11 +652,13 @@ export default class ThicknessHeatmapPanel extends Panel {
       summary({}, ["How to read this map"]),
       div({}, [
         "Cool colors mean thinner than the model; warm colors mean thicker. " +
-          "The tolerance band keeps small optical corrections neutral, and uncertain " +
+          "The tolerance band keeps small optical corrections faint and neutral, and uncertain " +
           "junction/serif areas are faded or gray.",
+        "Careful mode checks each stroke from both sides, which rejects chords across " +
+          "curves and junctions. It is slower; turn it off when you only need a quick read.",
         "This is a lens, not a judge. A bowl that is deliberately lighter than a stem, " +
-          "or an S spine that is deliberately heavier, is expected to show as a deviation. " +
-          "Read the pattern, not individual pixels.",
+          "an S spine that is deliberately heavier, or the thin right side of a V is expected " +
+          "to show as a deviation. Read the pattern, not individual pixels.",
       ]),
     ]);
 
@@ -710,6 +765,35 @@ export default class ThicknessHeatmapPanel extends Panel {
     if (this._controls.fadeCheckbox) {
       this._controls.fadeCheckbox.checked = settings.fadeLowConfidence;
     }
+    if (this._controls.carefulCheckbox) {
+      this._controls.carefulCheckbox.checked = settings.carefulMeasurement;
+    }
+    if (this._controls.penEdgeRange) {
+      // The slider intentionally caps at 100%; the number input remains the
+      // exact value and can go higher.
+      this._controls.penEdgeRange.value = Math.min(settings.translationMin, 1);
+    }
+    if (
+      this._controls.penEdgeInput &&
+      document.activeElement !== this._controls.penEdgeInput
+    ) {
+      this._controls.penEdgeInput.value = fmt(
+        settings.translationMin * 100,
+        1
+      ).replace(/\.?0+$/, "");
+    }
+    if (this.penEdgeEstimate) {
+      const thinnest = settings.baseThickness * settings.translationMin;
+      this.penEdgeEstimate.textContent =
+        `Thinnest stroke ≈ ${fmt(thinnest, 1)} units at the pen angle ` +
+        `(${fmt(settings.translationMin * 100, 0)}% of ${fmt(
+          settings.baseThickness,
+          1
+        )}).` +
+        (settings.translationMin > 1
+          ? " Pen edge is above the vertical target, so the contrast is inverted."
+          : "");
+    }
 
     if (this.translationSection) {
       this.translationSection.style.display =
@@ -736,6 +820,11 @@ export default class ThicknessHeatmapPanel extends Panel {
       settings.displayMode === "deviation" || settings.displayMode === "outliers";
     if (this.scaleSection) {
       this.scaleSection.style.display = deviationMode ? "flex" : "none";
+    }
+    if (this.toleranceSection) {
+      // Tolerance is a deviation concept; target and measured modes show
+      // absolute thickness and have no neutral band.
+      this.toleranceSection.style.display = deviationMode ? "flex" : "none";
     }
     if (this._controls.paletteSelect?.closest(".field-row")) {
       this._controls.paletteSelect.closest(".field-row").style.display =
@@ -771,8 +860,8 @@ export default class ThicknessHeatmapPanel extends Panel {
       right.textContent = fmt(legend.max, 0);
       this.legendNote.textContent =
         settings.displayMode === "measured"
-          ? "Measured caliper width, independent of the pen model."
-          : "Thickness predicted by the current pen model.";
+          ? "Measured caliper width, independent of the pen model. Tolerance applies only in deviation modes."
+          : "Thickness predicted by the current pen model. Tolerance applies only in deviation modes.";
     } else {
       this.legendBar.style.background = deviationGradientCSS(settings.palette);
       const tolerance = legend.tolerance ?? settings.tolerance;
@@ -789,9 +878,11 @@ export default class ThicknessHeatmapPanel extends Panel {
       middle.textContent = "0%";
       right.textContent = `${signed(legend.max, 0)}%`;
       this.legendNote.textContent =
-        settings.palette === "accessible"
-          ? "Cool = thinner than model; warm = thicker. Neutral and low-confidence areas fade back."
-          : "Blue = thinner than model; red = thicker. Neutral and low-confidence areas fade back.";
+        settings.displayMode === "outliers"
+          ? "Only deviations beyond the tolerance band are shown strongly; the neutral band and low-confidence areas fade back."
+          : settings.palette === "accessible"
+            ? "Cool = thinner than model; warm = thicker. The tolerance band is kept faint and neutral, and low-confidence areas fade back."
+            : "Blue = thinner than model; red = thicker. The tolerance band is kept faint and neutral, and low-confidence areas fade back.";
     }
   }
 

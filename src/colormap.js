@@ -145,10 +145,24 @@ export function renderHeatmapRGBA(analysis, settings) {
       const t = clamp(deviation / scaleRange, -1, 1);
       [r, g, b] = divergingColor(t, s.palette);
       const inside = Math.abs(deviation) <= s.tolerance;
-      if (s.displayMode === "outliers" && inside) {
-        alpha = s.opacity * 0.035;
+      if (inside) {
+        // The tolerance band is a neutral zone in both deviation and
+        // outliers mode. Keep it faint and desaturated so the band boundary
+        // is visible without pretending the correction is an error.
+        alpha = s.opacity * (s.displayMode === "outliers" ? 0.035 : 0.06);
+        const gray = 128;
+        const mix = 0.15;
+        r = gray + (r - gray) * mix;
+        g = gray + (g - gray) * mix;
+        b = gray + (b - gray) * mix;
       } else {
-        alpha = s.opacity * (0.2 + 0.8 * Math.abs(t));
+        const outside = clamp(
+          (Math.abs(deviation) - s.tolerance) /
+            Math.max(s.scaleRange - s.tolerance, 1),
+          0,
+          1
+        );
+        alpha = s.opacity * (0.15 + 0.85 * outside);
       }
     }
 
