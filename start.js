@@ -85,29 +85,34 @@ export function start(editorController, pluginPath) {
         if (settings.enabled === false) {
           return;
         }
-        const analysis = thicknessEngine.getAnalysis(positionedGlyph, settings);
-        if (!analysis) {
-          return;
-        }
-        const image = thicknessEngine.getImage(
-          analysis,
+        const glyphName = positionedGlyph?.glyph?.name;
+        const flowGuides = panel.getFlowGuidesForGlyphName(glyphName);
+        const analysis = thicknessEngine.getAnalysis(
+          positionedGlyph,
           settings,
-          getFocusContext(positionedGlyph)
+          { flowGuides }
         );
-        if (!image) {
-          return;
+        if (analysis) {
+          const image = thicknessEngine.getImage(
+            analysis,
+            settings,
+            getFocusContext(positionedGlyph)
+          );
+          if (image) {
+            context.save();
+            context.imageSmoothingEnabled = true;
+            context.drawImage(
+              image,
+              analysis.originX,
+              analysis.originY,
+              analysis.physicalWidth,
+              analysis.physicalHeight
+            );
+            context.restore();
+          }
         }
 
-        context.save();
-        context.imageSmoothingEnabled = true;
-        context.drawImage(
-          image,
-          analysis.originX,
-          analysis.originY,
-          analysis.physicalWidth,
-          analysis.physicalHeight
-        );
-        context.restore();
+        panel.drawFlowGuides(context, positionedGlyph, glyphName);
       },
     };
 

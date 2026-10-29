@@ -15,6 +15,10 @@ import {
 } from "./core.js";
 import { renderHeatmapRGBA } from "./colormap.js";
 import { groupContourSources } from "./elements.js";
+import {
+  flowGuideSignature,
+  normalizeFlowGuides,
+} from "./guides.js";
 
 const MAX_RENDER_CACHE_ENTRIES = 6;
 const RASTER_MARGIN = 6;
@@ -61,6 +65,20 @@ function readMask(context, width, height) {
     }
   }
   return { mask, inkPixels };
+}
+
+function guidesToRaster(guides, bounds, scale, x0 = 0, y0 = 0) {
+  if (!guides?.length) {
+    return [];
+  }
+  return guides
+    .map((points) =>
+      points.map((point) => ({
+        x: (point.x - bounds.xMin) * scale + RASTER_MARGIN - x0,
+        y: (point.y - bounds.yMin) * scale + RASTER_MARGIN - y0,
+      }))
+    )
+    .filter((points) => points.length >= 2);
 }
 
 function mergeElementSamples(elements, fullWidth) {
@@ -269,7 +287,7 @@ export class ThicknessEngine {
     this._emit(null);
   }
 
-  getAnalysis(positionedGlyph, settings) {
+  getAnalysis(positionedGlyph, settings, options = {}) {
     const glyph = positionedGlyph?.glyph;
     const path = glyph?.flattenedPath2d;
     const bounds = positionedGlyph?.unpositionedBounds || glyph?.controlBounds;
@@ -286,9 +304,15 @@ export class ThicknessEngine {
     }
 
     const normalized = normalizeSettings(settings);
-    const signature = `${analysisSignature(normalized)}|${bounds.xMin.toFixed(
+    const guides = normalized.useFlowGuides
+      ? normalizeFlowGuides(options.flowGuides)
+      : [];
+    const signature = `${analysisSignature(normalized)}|${flowGuideSignature(
+      guides,
+      normalized.flowGuideMode
+    )}|${bounds.xMin.toFixed(3)},${bounds.yMin.toFixed(
       3
-    )},${bounds.yMin.toFixed(3)},${bounds.xMax.toFixed(3)},${bounds.yMax.toFixed(3)}`;
+    )},${bounds.xMax.toFixed(3)},${bounds.yMax.toFixed(3)}`;
 
     let cached = this._pathCache.get(path);
     if (cached?.signature === signature) {
@@ -296,7 +320,7 @@ export class ThicknessEngine {
       return cached.analysis;
     }
 
-    const analysis = this._analyze(path, bounds, normalized, glyph);
+    const analysis = this._analyze(path, bounds, normalized, glyph, guides);
     if (!analysis) {
       this._emit(null);
       return null;
@@ -308,7 +332,7 @@ export class ThicknessEngine {
     return analysis;
   }
 
-  _analyze(path, bounds, settings, glyph) {
+  _analyze(path, bounds, settings, glyph, guides = []) {
     const geometry = rasterGeometry(bounds, settings);
     const blurRadius = clamp(
       Math.round(Math.min(geometry.width, geometry.height) / 120),
@@ -322,7 +346,8 @@ export class ThicknessEngine {
         bounds,
         settings,
         geometry,
-        blurRadius
+        blurRadius,
+        guides
       );
       if (perElement) {
         return perElement;
@@ -364,7 +389,10 @@ export class ThicknessEngine {
       geometry.height,
       settings,
       geometry.scale,
-      { blurRadius }
+      {
+        blurRadius,
+        guides: guidesToRaster(guides, bounds, geometry.scale),
+      }
     );
     analysis.originX = geometry.originX;
     analysis.originY = geometry.originY;
@@ -375,7 +403,7 @@ export class ThicknessEngine {
     return analysis;
   }
 
-  _analyzeElements(glyph, bounds, settings, geometry, blurRadius) {
+  _analyzeElements(glyph, bounds, settings, geometry, blurRadius, guides = []) {
     const sources = [{ path: glyph.path, componentIndex: null }];
     for (let i = 0; i < (glyph.components?.length || 0); i++) {
       const component = glyph.components[i];
@@ -418,7 +446,8 @@ export class ThicknessEngine {
         bounds,
         settings,
         geometry,
-        blurRadius
+        blurRadius,
+        guides
       );
       return result;
     });
@@ -526,6 +555,9 @@ export class ThicknessEngine {
 
     const mergedSamples = mergeElementSamples(elements, geometry.width);
     const stats = summarizeSamples(mergedSamples, settings.tolerance);
+    const guidedElements = elements.filter(
+      (element) => element.analysis?.flowGuides
+    );
 
     return {
       width: geometry.width,
@@ -546,12 +578,31 @@ export class ThicknessEngine {
       pointToElement,
       componentToElements: grouped.componentToElements,
       flattenedContourToElement: grouped.flattenedContourToElement,
+      flowGuides: guidedElements.length
+        ? {
+            mode: settings.flowGuideMode,
+            guideCount: guides.length,
+            elements: guidedElements.length,
+            influencedPixels: guidedElements.reduce(
+              (total, element) =>
+                total + element.analysis.flowGuides.influencedPixels,
+              0
+            ),
+          }
+        : null,
       perElement: true,
       renderCache: new Map(),
     };
   }
 
-  _analyzeElement(element, bounds, settings, geometry, blurRadius) {
+  _analyzeElement(
+    element,
+    bounds,
+    settings,
+    geometry,
+    blurRadius,
+    guides = []
+  ) {
     const elementBounds = element.bounds;
     if (!elementBounds) {
       return null;
@@ -613,7 +664,10 @@ export class ThicknessEngine {
       height,
       settings,
       scale,
-      { blurRadius }
+      {
+        blurRadius,
+        guides: guidesToRaster(guides, bounds, scale, x0, y0),
+      }
     );
     analysis.originX = geometry.originX + x0 / scale;
     analysis.originY = geometry.originY + y0 / scale;
@@ -754,8 +808,8 @@ export class ThicknessEngine {
     return canvas;
   }
 
-  fitThicknesses(positionedGlyph, settings) {
-    const analysis = this.getAnalysis(positionedGlyph, settings);
+  fitThicknesses(positionedGlyph, settings, options = {}) {
+    const analysis = this.getAnalysis(positionedGlyph, settings, options);
     return estimateThicknessesFromAnalysis(analysis);
   }
 }

@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fontra thickness debug — a</title>
+<style>
+  body { margin: 0; background: #1d1f21; color: #e8eaed; font: 14px/1.4 system-ui, sans-serif; }
+  #wrap { display: flex; gap: 16px; padding: 16px; }
+  #stage { position: relative; background: #fbfbfb; border-radius: 8px; }
+  canvas { display: block; }
+  #outline { position: absolute; inset: 0; pointer-events: none; }
+  #controls { width: 260px; }
+  label { display: block; margin: 8px 0 2px; }
+  select, input[type=number] { width: 100%; }
+  pre { white-space: pre-wrap; font-size: 12px; color: #aab; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="stage">
+    <canvas id="heat"></canvas>
+    <canvas id="outline"></canvas>
+  </div>
+  <div id="controls">
+    <label>Display mode</label>
+    <select id="mode">
+      <option value="measured">Measured</option>
+      <option value="target" selected>Target</option>
+      <option value="deviation">Deviation</option>
+      <option value="outliers">Outliers</option>
+    </select>
+    <label>Careful measurement</label>
+    <select id="careful"><option value="true" selected>On</option><option value="false">Off</option></select>
+    <label>Per-element</label>
+    <select id="perElement"><option value="false" selected>Off</option><option value="true">On</option></select>
+    <label>Base thickness</label>
+    <input id="base" type="number" value="100" step="1">
+    <label>Pen angle</label>
+    <input id="angle" type="number" value="30" step="1">
+    <label>Quality</label>
+    <select id="quality"><option value="fast">Fast</option><option value="balanced" selected>Balanced</option><option value="fine">Fine</option></select>
+    <label><input id="fade" type="checkbox" checked> Fade low confidence</label>
+    <pre id="stats"></pre>
+  </div>
+</div>
+<script type="module">
+import { analyzeMask, normalizeSettings } from "./core-old.js";
+import { renderHeatmapRGBA } from "../src/colormap.js";
+
+const SIZE = 2800;
+const MARGIN = 40;
+
+const glyph = await (await fetch("./a.json")).json();
+const contours = glyph.layers.ab9cd723.glyph.path.contours;
+
+const path = new Path2D();
+for (const contour of contours) {
+  const pts = contour.points;
+  let i = 0;
+  // Find the first on-curve point.
+  while (i < pts.length && pts[i].type === "cubic") i++;
+  if (i >= pts.length) continue;
+  const first = pts[i];
+  path.moveTo(first.x, first.y);
+  let start = i;
+  i = (i + 1) % pts.length;
+  let segmentStart = first;
+  while (i !== start) {
+    const p = pts[i];
+    if (p.type === "cubic") {
+      const c1 = p;
+      const next = pts[(i + 1) % pts.length];
+      if (next.type === "cubic") {
+        // two control points: c1, c2, then endpoint
+        const c2 = next;
+        const end = pts[(i + 2) % pts.length];
+        path.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, end.x, end.y);
+        i = (i + 2) % pts.length;
+        segmentStart = end;
+      } else {
+        // single control point: quadratic-ish, treat as cubic with c1=c2
+        path.bezierCurveTo(c1.x, c1.y, next.x, next.y, next.x, next.y);
+        i = (i + 1) % pts.length;
+        segmentStart = next;
+      }
+    } else {
+      path.lineTo(p.x, p.y);
+      segmentStart = p;
+      i = (i + 1) % pts.length;
+    }
+    if (i === start) break;
+  }
+  path.closePath();
+}
+
+const bounds = { xMin: Infinity, yMin: Infinity, xMax: -Infinity, yMax: -Infinity };
+for (const contour of contours) for (const p of contour.points) {
+  bounds.xMin = Math.min(bounds.xMin, p.x);
+  bounds.yMin = Math.min(bounds.yMin, p.y);
+  bounds.xMax = Math.max(bounds.xMax, p.x);
+  bounds.yMax = Math.max(bounds.yMax, p.y);
+}
+const scale = (SIZE - 2 * MARGIN) / Math.max(bounds.xMax - bounds.xMin, bounds.yMax - bounds.yMin);
+const width = Math.ceil((bounds.xMax - bounds.xMin) * scale) + 2 * MARGIN;
+const height = Math.ceil((bounds.yMax - bounds.yMin) * scale) + 2 * MARGIN;
+
+const heat = document.querySelector("#heat");
+const outline = document.querySelector("#outline");
+heat.width = width; heat.height = height;
+outline.width = width; outline.height = height;
+document.querySelector("#stage").style.width = width + "px";
+document.querySelector("#stage").style.height = height + "px";
+
+const offscreen = document.createElement("canvas");
+offscreen.width = width; offscreen.height = height;
+const offctx = offscreen.getContext("2d", { willReadFrequently: true });
+
+function render() {
+  const settings = normalizeSettings({
+    displayMode: document.querySelector("#mode").value,
+    carefulMeasurement: document.querySelector("#careful").value === "true",
+    perElement: document.querySelector("#perElement").value === "true",
+    baseThickness: Number(document.querySelector("#base").value),
+    penAngle: Number(document.querySelector("#angle").value),
+    modelType: "translation",
+    quality: document.querySelector("#quality").value,
+    palette: "accessible",
+    tolerance: 5,
+    scaleRange: 25,
+    opacity: 0.82,
+    fadeLowConfidence: document.querySelector("#fade").checked,
+  });
+
+  offctx.setTransform(1, 0, 0, 1, 0, 0);
+  offctx.clearRect(0, 0, width, height);
+  offctx.setTransform(scale, 0, 0, scale, MARGIN - bounds.xMin * scale, MARGIN - bounds.yMin * scale);
+  offctx.fillStyle = "#fff";
+  offctx.fill(path);
+  const imageData = offctx.getImageData(0, 0, width, height);
+  const mask = new Uint8Array(width * height);
+  for (let i = 0; i < mask.length; i++) if (imageData.data[i * 4 + 3] >= 128) mask[i] = 1;
+
+  const analysis = analyzeMask(mask, width, height, settings, scale, {
+    blurRadius: Math.max(3, Math.min(8, Math.round(Math.min(width, height) / 120))),
+  });
+  window.analysis = analysis;
+  window.mask = mask;
+  window.analysisSettings = settings;
+  window.analysisScale = scale;
+  window.analysisBounds = bounds;
+  window.analysisSize = { width, height };
+  const { data } = renderHeatmapRGBA(analysis, settings);
+
+  const ctx = heat.getContext("2d");
+  ctx.clearRect(0, 0, width, height);
+  const display = ctx.createImageData(width, height);
+  for (let y = 0; y < height; y++) {
+    const srcY = height - 1 - y;
+    for (let x = 0; x < width; x++) {
+      const s = (srcY * width + x) * 4;
+      const t = (y * width + x) * 4;
+      display.data[t] = data[s];
+      display.data[t + 1] = data[s + 1];
+      display.data[t + 2] = data[s + 2];
+      display.data[t + 3] = data[s + 3];
+    }
+  }
+  ctx.putImageData(display, 0, 0);
+
+  const octx = outline.getContext("2d");
+  octx.clearRect(0, 0, width, height);
+  octx.save();
+  octx.translate(0, height);
+  octx.scale(1, -1);
+  octx.setTransform(scale, 0, 0, -scale, MARGIN - bounds.xMin * scale, height - MARGIN + bounds.yMin * scale);
+  octx.strokeStyle = "rgba(20,20,20,0.65)";
+  octx.lineWidth = 1 / scale;
+  octx.stroke(path);
+  octx.restore();
+
+  const accepted = [];
+  for (let i = 0; i < analysis.samples.pointCount; i++) {
+    if (analysis.samples.confidence[i] >= 0.5 && analysis.samples.actual[i] > 0) accepted.push(analysis.samples.actual[i]);
+  }
+  accepted.sort((a, b) => a - b);
+  const median = accepted.length ? accepted[Math.floor(accepted.length / 2)] : 0;
+  document.querySelector("#stats").textContent =
+    `ink ${mask.reduce((a, b) => a + b, 0)} px\n` +
+    `samples ${analysis.samples.pointCount}\n` +
+    `confident ${accepted.length}\n` +
+    `actual median ${median.toFixed(1)}\n` +
+    `stats ${JSON.stringify(analysis.stats, null, 1)}`;
+}
+
+window.inspectPixel = (screenX, screenY) => {
+  const analysis = window.analysis;
+  if (!analysis) return null;
+  const { width, height } = window.analysisSize;
+  const x = Math.round(screenX);
+  const y = height - 1 - Math.round(screenY);
+  const index = y * width + x;
+  const s = analysis.samples;
+  const raw = analysis.nearestSample[index];
+  const confident = analysis.nearestConfidentSample[index];
+  const describe = (i) =>
+    i >= 0
+      ? {
+          i,
+          x: s.x[i],
+          y: s.y[i],
+          actual: s.actual[i],
+          target: s.target[i],
+          confidence: s.confidence[i],
+          nx: s.nx[i],
+          ny: s.ny[i],
+          tangent: s.tangent[i],
+        }
+      : null;
+  return {
+    screen: { x: screenX, y: screenY },
+    raster: { x, y },
+    mask: analysis.mask[index],
+    actual: analysis.pixels.actual[index],
+    fallbackActual: analysis.pixels.fallbackActual?.[index],
+    target: analysis.pixels.target[index],
+    fallbackTarget: analysis.pixels.fallbackTarget?.[index],
+    confidence: analysis.pixels.confidence[index],
+    raw: describe(raw),
+    confident: describe(confident),
+  };
+};
+
+window.downloadHeat = (name = "heat") => {
+  const c = document.querySelector("#heat");
+  const a = document.createElement("a");
+  a.href = c.toDataURL("image/png");
+  a.download = `${name}.png`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
+for (const id of ["mode", "careful", "perElement", "base", "angle", "quality", "fade"]) {
+  document.querySelector("#" + id).addEventListener("input", render);
+}
+render();
+</script>
+</body>
+</html>

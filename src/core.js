@@ -43,6 +43,9 @@ export const DEFAULT_SETTINGS = {
   perElement: false,
   elementFocus: "all",
   fadeOtherElements: true,
+  flowGuideMode: "across",
+  useFlowGuides: true,
+  showFlowGuides: true,
 };
 
 const DEG = Math.PI / 180;
@@ -120,6 +123,9 @@ export function normalizeSettings(settings = {}) {
       ? settings.elementFocus
       : DEFAULT_SETTINGS.elementFocus,
     fadeOtherElements: settings.fadeOtherElements !== false,
+    flowGuideMode: settings.flowGuideMode === "along" ? "along" : "across",
+    useFlowGuides: settings.useFlowGuides !== false,
+    showFlowGuides: settings.showFlowGuides !== false,
   };
 }
 
@@ -538,6 +544,31 @@ function traceBothSides(
   };
 }
 
+function medianFilter(values, mask, width, height, radius) {
+  const n = width * height;
+  const out = new Float32Array(n);
+  const window = [];
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const index = y * width + x;
+      if (!mask[index]) {
+        continue;
+      }
+      window.length = 0;
+      for (let yy = Math.max(0, y - radius); yy <= Math.min(height - 1, y + radius); yy++) {
+        for (let xx = Math.max(0, x - radius); xx <= Math.min(width - 1, x + radius); xx++) {
+          const neighbor = yy * width + xx;
+          if (mask[neighbor] && values[neighbor] > 0) {
+            window.push(values[neighbor]);
+          }
+        }
+      }
+      out[index] = window.length ? median(window) : values[index];
+    }
+  }
+  return out;
+}
+
 function boxBlurWeighted(values, weights, width, height, radius) {
   if (radius <= 0) {
     return { values, weights };
@@ -619,10 +650,22 @@ export function sampleSupportsPixel(
   if (along < -0.5) {
     return false;
   }
+  // A sample can only describe pixels within its own stroke. On a curve the
+  // inward normal is not a narrow ray, so allow a wide wedge, but never let a
+  // thin stroke's sample reach across a thick neighbouring stroke.
+  const distance = Math.hypot(vx, vy);
+  const measuredWidth = samples.actual?.[seedIndex];
+  if (
+    Number.isFinite(measuredWidth) &&
+    measuredWidth > 0 &&
+    distance > measuredWidth * 1.15 + 2
+  ) {
+    return false;
+  }
   const lateral = Math.abs(
     vx * samples.ny[seedIndex] - vy * samples.nx[seedIndex]
   );
-  if (lateral > along * 1.1 + 2) {
+  if (lateral > along * 3.5 + 2) {
     return false;
   }
   if (referenceTangent != null) {
@@ -638,7 +681,396 @@ export function sampleSupportsPixel(
   return true;
 }
 
-function buildPixelMaps(analysis, mask, settings) {
+/**
+ * Smooth widths and stroke directions while keeping different strokes apart.
+ * A plain box blur averages the thin arm's direction into a neighbouring bowl
+ * and produces radial fans at a junction. This filter only accepts a neighbour
+ * when its doubled-angle direction agrees with the pixel's own raw boundary
+ * sample, so directions diffuse along a stroke but not across it.
+ */
+function smoothCompatibleField(
+  actual,
+  directionX,
+  directionY,
+  weights,
+  referenceX,
+  referenceY,
+  mask,
+  width,
+  height,
+  passes
+) {
+  const n = width * height;
+  let currentActual = Float64Array.from(actual);
+  let currentX = Float64Array.from(directionX);
+  let currentY = Float64Array.from(directionY);
+  let currentWeights = Float64Array.from(weights);
+  let nextActual = new Float64Array(n);
+  let nextX = new Float64Array(n);
+  let nextY = new Float64Array(n);
+  let nextWeights = new Float64Array(n);
+  const offsets = [
+    [-1, -1, 0.5],
+    [0, -1, 1],
+    [1, -1, 0.5],
+    [-1, 0, 1],
+    [0, 0, 1],
+    [1, 0, 1],
+    [-1, 1, 0.5],
+    [0, 1, 1],
+    [1, 1, 0.5],
+  ];
+
+  for (let pass = 0; pass < passes; pass++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const index = y * width + x;
+        if (!mask[index]) {
+          continue;
+        }
+        const rx = referenceX[index];
+        const ry = referenceY[index];
+        const hasReference = rx * rx + ry * ry > 1e-6;
+        let sumWeight = 0;
+        let sumActual = 0;
+        let sumX = 0;
+        let sumY = 0;
+        for (const [dx, dy, spatial] of offsets) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= width || yy >= height) {
+            continue;
+          }
+          const neighbor = yy * width + xx;
+          if (!mask[neighbor]) {
+            continue;
+          }
+          const neighborWeight = currentWeights[neighbor];
+          if (neighborWeight <= 1e-6) {
+            continue;
+          }
+          let compatibility = 1;
+          if (hasReference) {
+            const length = Math.hypot(
+              currentX[neighbor],
+              currentY[neighbor]
+            );
+            if (length > 1e-6) {
+              const dot =
+                (rx * currentX[neighbor] + ry * currentY[neighbor]) / length;
+              // cos(2 * angle difference): parallel and opposite strokes agree;
+              // perpendicular and diagonal strokes are rejected.
+              compatibility = Math.max(0, dot);
+              compatibility *= compatibility;
+              compatibility *= compatibility;
+            } else {
+              compatibility = 0;
+            }
+          }
+          if (compatibility <= 0) {
+            continue;
+          }
+          const weight = neighborWeight * spatial * compatibility;
+          sumWeight += weight;
+          sumActual += currentActual[neighbor] * weight;
+          sumX += currentX[neighbor] * weight;
+          sumY += currentY[neighbor] * weight;
+        }
+        if (sumWeight > 1e-6) {
+          nextActual[index] = sumActual / sumWeight;
+          const length = Math.hypot(sumX, sumY);
+          if (length > 1e-6) {
+            nextX[index] = sumX / length;
+            nextY[index] = sumY / length;
+          }
+          nextWeights[index] = Math.min(1, sumWeight / 6);
+        } else {
+          nextActual[index] = currentActual[index];
+          nextX[index] = currentX[index];
+          nextY[index] = currentY[index];
+          nextWeights[index] = currentWeights[index];
+        }
+      }
+    }
+    [currentActual, nextActual] = [nextActual, currentActual];
+    [currentX, nextX] = [nextX, currentX];
+    [currentY, nextY] = [nextY, currentY];
+    [currentWeights, nextWeights] = [nextWeights, currentWeights];
+    nextActual.fill(0);
+    nextX.fill(0);
+    nextY.fill(0);
+    nextWeights.fill(0);
+  }
+
+  return {
+    actual: currentActual,
+    directionX: currentX,
+    directionY: currentY,
+    weights: currentWeights,
+  };
+}
+
+const GUIDE_SAMPLE_STEP = 0.75;
+const GUIDE_MAX_SAMPLES_PER_GUIDE = 20000;
+
+function traceGuideWidthPx(mask, width, height, x, y, tx, ty) {
+  const step = 0.5;
+  const maxDistance = Math.hypot(width, height) + 2;
+  let backward = 0;
+  let forward = 0;
+
+  for (let distance = step; distance <= maxDistance; distance += step) {
+    const px = x - tx * distance;
+    const py = y - ty * distance;
+    if (
+      px < 0 ||
+      py < 0 ||
+      px > width - 1 ||
+      py > height - 1 ||
+      sampleMaskBilinear(mask, width, height, px, py) <= 0.5
+    ) {
+      break;
+    }
+    backward = distance;
+  }
+
+  for (let distance = step; distance <= maxDistance; distance += step) {
+    const px = x + tx * distance;
+    const py = y + ty * distance;
+    if (
+      px < 0 ||
+      py < 0 ||
+      px > width - 1 ||
+      py > height - 1 ||
+      sampleMaskBilinear(mask, width, height, px, py) <= 0.5
+    ) {
+      break;
+    }
+    forward = distance;
+  }
+
+  return backward + forward + 1;
+}
+
+function densifyGuide(points) {
+  const dense = [];
+  for (let i = 1; i < points.length; i++) {
+    const start = points[i - 1];
+    const end = points[i];
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
+    const steps = Math.max(1, Math.ceil(length / GUIDE_SAMPLE_STEP));
+    for (let step = 0; step < steps; step++) {
+      const t = step / steps;
+      dense.push({
+        x: start.x + (end.x - start.x) * t,
+        y: start.y + (end.y - start.y) * t,
+      });
+      if (dense.length >= GUIDE_MAX_SAMPLES_PER_GUIDE) {
+        return dense;
+      }
+    }
+  }
+  if (points.length) {
+    dense.push(points[points.length - 1]);
+  }
+  return dense;
+}
+
+/**
+ * Turn user-drawn guide polylines into a local direction field. In `across`
+ * mode a guide is a cross-section: its perpendicular is the stroke flow and
+ * its ink span is a manual caliper width. In `along` mode the guide itself is
+ * the flow direction.
+ *
+ * Only guide samples inside the ink become seeds. Each ink pixel takes the
+ * nearest seed, with a smooth falloff so an isolated guide cannot repaint the
+ * whole glyph.
+ */
+export function buildFlowGuideField(mask, width, height, guides, options = {}) {
+  if (!Array.isArray(guides) || !guides.length) {
+    return null;
+  }
+
+  const mode = options.mode === "along" ? "along" : "across";
+  const scale = Math.max(options.scale ?? 1, 1e-6);
+  const n = width * height;
+  const seed = new Uint8Array(n);
+  const seedCos = new Float32Array(n);
+  const seedSin = new Float32Array(n);
+  const seedActual = new Float32Array(n);
+  const widthSamples = [];
+  let seedCount = 0;
+
+  for (const points of guides) {
+    if (!Array.isArray(points) || points.length < 2) {
+      continue;
+    }
+    const dense = densifyGuide(points);
+    if (dense.length < 2) {
+      continue;
+    }
+
+    for (let i = 0; i < dense.length; i++) {
+      const previous = dense[Math.max(0, i - 1)];
+      const next = dense[Math.min(dense.length - 1, i + 1)];
+      let tx = next.x - previous.x;
+      let ty = next.y - previous.y;
+      const tangentLength = Math.hypot(tx, ty);
+      if (tangentLength <= 1e-6) {
+        continue;
+      }
+      tx /= tangentLength;
+      ty /= tangentLength;
+
+      const x = dense[i].x;
+      const y = dense[i].y;
+      const px = Math.round(x);
+      const py = Math.round(y);
+      if (px < 0 || py < 0 || px >= width || py >= height) {
+        continue;
+      }
+      const index = py * width + px;
+      if (!mask[index]) {
+        continue;
+      }
+
+      let widthPx = 0;
+      if (mode === "across") {
+        widthPx = traceGuideWidthPx(mask, width, height, x, y, tx, ty);
+        if (!(widthPx > 0)) {
+          continue;
+        }
+        widthSamples.push(widthPx);
+      }
+
+      // `across`: the line is the caliper, so flow is perpendicular to it.
+      // `along`: the line itself runs down the stroke.
+      const flowTangent =
+        mode === "across" ? Math.atan2(tx, -ty) : Math.atan2(ty, tx);
+      const doubled = 2 * flowTangent;
+      seed[index] = 1;
+      seedCos[index] = Math.cos(doubled);
+      seedSin[index] = Math.sin(doubled);
+      seedActual[index] = widthPx / scale;
+      seedCount++;
+    }
+  }
+
+  if (!seedCount) {
+    return null;
+  }
+
+  const { distance, nearest } = distanceTransform(seed, width, height);
+  const medianWidthPx = widthSamples.length ? median(widthSamples) : 0;
+  const fallbackReach = options.fallbackReachPx ?? 0;
+  let reachPx =
+    mode === "across" && medianWidthPx > 0
+      ? medianWidthPx * 2.2 + 8
+      : fallbackReach;
+  if (!(reachPx > 0)) {
+    reachPx = Math.max(12, Math.min(width, height) * 0.25);
+  }
+  reachPx = clamp(reachPx, 10, Math.max(width, height) * 0.65);
+
+  const weight = new Float32Array(n);
+  const directionX = new Float32Array(n);
+  const directionY = new Float32Array(n);
+  const actual = new Float32Array(n);
+  let influencedPixels = 0;
+
+  for (let index = 0; index < n; index++) {
+    if (!mask[index]) {
+      continue;
+    }
+    const seedIndex = nearest[index];
+    if (seedIndex < 0) {
+      continue;
+    }
+    const distancePx = Math.sqrt(distance[index]);
+    if (!(distancePx < reachPx)) {
+      continue;
+    }
+    const t = 1 - distancePx / reachPx;
+    // Smoothstep keeps the guide fully in control on the line and hands the
+    // measurement back to the outline gradually.
+    const guideWeight = t * t * (3 - 2 * t);
+    directionX[index] = seedCos[seedIndex];
+    directionY[index] = seedSin[seedIndex];
+    actual[index] = seedActual[seedIndex];
+    weight[index] = guideWeight;
+    influencedPixels++;
+  }
+
+  if (!influencedPixels) {
+    return null;
+  }
+
+  return {
+    mode,
+    width,
+    height,
+    weight,
+    directionX,
+    directionY,
+    actual,
+    guideCount: guides.length,
+    reachPx,
+    influencedPixels,
+  };
+}
+
+function blendTangents(baseTangent, guideX, guideY, weight) {
+  if (!(weight > 0)) {
+    return baseTangent;
+  }
+  const baseX = Math.cos(2 * baseTangent);
+  const baseY = Math.sin(2 * baseTangent);
+  const x = baseX * (1 - weight) + guideX * weight;
+  const y = baseY * (1 - weight) + guideY * weight;
+  if (Math.hypot(x, y) <= 1e-6) {
+    return baseTangent;
+  }
+  return 0.5 * Math.atan2(y, x);
+}
+
+function applyFlowGuidesToSamples(samples, field, settings) {
+  if (!field) {
+    return;
+  }
+  const width = field.width;
+  const height = field.height;
+  for (let i = 0; i < samples.pointCount; i++) {
+    const px = clamp(Math.round(samples.x[i]), 0, width - 1);
+    const py = clamp(Math.round(samples.y[i]), 0, height - 1);
+    const index = py * width + px;
+    const weight = field.weight[index];
+    if (!(weight > 0)) {
+      continue;
+    }
+
+    samples.tangent[i] = blendTangents(
+      samples.tangent[i],
+      field.directionX[index],
+      field.directionY[index],
+      weight
+    );
+    if (field.actual[index] > 0) {
+      samples.actual[i] =
+        samples.actual[i] * (1 - weight) + field.actual[index] * weight;
+    }
+    samples.confidence[i] =
+      samples.confidence[i] * (1 - weight) + 0.95 * weight;
+    samples.target[i] =
+      settings.baseThickness *
+      modelThicknessFactor(settings, samples.tangent[i]);
+    samples.deviation[i] = deviationPercent(
+      samples.actual[i],
+      samples.target[i]
+    );
+  }
+}
+
+function buildPixelMaps(analysis, mask, settings, flowGuides = null) {
   const { width, height, samples } = analysis;
   const n = width * height;
   const actual = new Float32Array(n);
@@ -653,6 +1085,8 @@ function buildPixelMaps(analysis, mask, settings) {
   const directionXWeighted = new Float64Array(n);
   const directionYWeighted = new Float64Array(n);
   const weights = new Float64Array(n);
+  const referenceX = new Float64Array(n);
+  const referenceY = new Float64Array(n);
   const confidenceWeighted = new Float64Array(n);
   const confidenceWeights = new Float64Array(n);
 
@@ -665,6 +1099,9 @@ function buildPixelMaps(analysis, mask, settings) {
     if (rawIndex >= 0) {
       fallbackActual[index] = samples.actual[rawIndex];
       fallbackTarget[index] = samples.target[rawIndex];
+      const doubledReference = 2 * samples.tangent[rawIndex];
+      referenceX[index] = Math.cos(doubledReference);
+      referenceY[index] = Math.sin(doubledReference);
     }
 
     // Widths come only from confidently measured boundary samples. Ambiguous
@@ -745,21 +1182,20 @@ function buildPixelMaps(analysis, mask, settings) {
     4,
     20
   );
-  const directionRadius = clamp(Math.round(radius * 1.5), 5, 28);
-  const blurredActual = boxBlurWeighted(actualWeighted, weights, width, height, radius);
-  const blurredDirectionX = boxBlurWeighted(
+  // A plain blur mixes the diagonal arm's tangent into the bowl and creates
+  // target fans around junctions. Diffuse only between neighbours whose
+  // doubled-angle directions agree with the pixel's own boundary sample.
+  const smoothed = smoothCompatibleField(
+    actualWeighted,
     directionXWeighted,
-    weights,
-    width,
-    height,
-    directionRadius
-  );
-  const blurredDirectionY = boxBlurWeighted(
     directionYWeighted,
     weights,
+    referenceX,
+    referenceY,
+    mask,
     width,
     height,
-    directionRadius
+    6
   );
   const confidenceRadius = clamp(Math.round(radius * 0.75), 3, 14);
   const blurredConfidence = boxBlurWeighted(
@@ -774,29 +1210,70 @@ function buildPixelMaps(analysis, mask, settings) {
     if (!mask[index]) {
       continue;
     }
-    if (blurredActual.weights[index] > 0) {
-      actual[index] = blurredActual.values[index] / blurredActual.weights[index];
+    if (smoothed.actual[index] > 0) {
+      actual[index] = smoothed.actual[index];
     }
-
-    const directionWeight = blurredDirectionX.weights[index];
-    if (directionWeight > 0) {
-      const dx = blurredDirectionX.values[index] / directionWeight;
-      const dy = blurredDirectionY.values[index] / directionWeight;
-      if (Math.hypot(dx, dy) > 1e-4) {
-        const tangent = 0.5 * Math.atan2(dy, dx);
-        target[index] =
-          settings.baseThickness * modelThicknessFactor(settings, tangent);
-      }
+    const dx = smoothed.directionX[index];
+    const dy = smoothed.directionY[index];
+    let tangent = null;
+    if (Math.hypot(dx, dy) > 1e-3) {
+      tangent = 0.5 * Math.atan2(dy, dx);
     }
 
     const totalConfidenceWeight = blurredConfidence.weights[index];
     confidence[index] =
-      totalConfidenceWeight > 0
+      totalConfidenceWeight > 1e-4
         ? blurredConfidence.values[index] / totalConfidenceWeight
         : 0;
+
+    const guideWeight = flowGuides ? flowGuides.weight[index] : 0;
+    if (guideWeight > 0) {
+      if (tangent == null) {
+        tangent =
+          0.5 *
+          Math.atan2(
+            flowGuides.directionY[index],
+            flowGuides.directionX[index]
+          );
+      } else {
+        tangent = blendTangents(
+          tangent,
+          flowGuides.directionX[index],
+          flowGuides.directionY[index],
+          guideWeight
+        );
+      }
+      if (flowGuides.actual[index] > 0) {
+        actual[index] =
+          actual[index] * (1 - guideWeight) +
+          flowGuides.actual[index] * guideWeight;
+      }
+      // A guide is an explicit instruction, so its area should not disappear
+      // behind the confidence fade.
+      confidence[index] =
+        confidence[index] * (1 - guideWeight) + 0.95 * guideWeight;
+    }
+
+    if (tangent != null) {
+      target[index] =
+        settings.baseThickness * modelThicknessFactor(settings, tangent);
+    }
   }
 
-  return { actual, target, confidence, fallbackActual, fallbackTarget };
+  return {
+    actual,
+    target,
+    confidence,
+    fallbackActual,
+    fallbackTarget,
+    debug: {
+      actualWeighted,
+      weights,
+      smoothed,
+      directionXWeighted,
+      directionYWeighted,
+    },
+  };
 }
 
 function median(values) {
@@ -1212,6 +1689,33 @@ export function analyzeMask(mask, width, height, settings, scale, options = {}) 
     normalized,
     blurRadius
   );
+
+  let flowGuideField = null;
+  if (normalized.useFlowGuides && options.guides?.length) {
+    const trustedWidths = [];
+    for (let i = 0; i < samples.pointCount; i++) {
+      if (
+        samples.confidence[i] >= CONFIDENCE_ACCEPT &&
+        samples.actual[i] > 0
+      ) {
+        trustedWidths.push(samples.actual[i] * scale);
+      }
+    }
+    const medianWidthPx = trustedWidths.length ? median(trustedWidths) : 0;
+    flowGuideField = buildFlowGuideField(
+      mask,
+      width,
+      height,
+      options.guides,
+      {
+        mode: normalized.flowGuideMode,
+        scale,
+        fallbackReachPx: medianWidthPx > 0 ? medianWidthPx * 2.2 + 8 : 0,
+      }
+    );
+    applyFlowGuidesToSamples(samples, flowGuideField, normalized);
+  }
+
   boundaryToSample.fill(-1);
   for (let i = 0; i < samples.pointCount; i++) {
     boundaryToSample[samples.pixel[i]] = i;
@@ -1258,9 +1762,22 @@ export function analyzeMask(mask, width, height, settings, scale, options = {}) 
     nearestSample,
     nearestConfidentSample,
     samples,
+    flowGuides: flowGuideField
+      ? {
+          mode: flowGuideField.mode,
+          guideCount: flowGuideField.guideCount,
+          reachPx: flowGuideField.reachPx,
+          influencedPixels: flowGuideField.influencedPixels,
+        }
+      : null,
     stats: summarizeSamples(samples, normalized.tolerance),
   };
-  analysis.pixels = buildPixelMaps(analysis, mask, normalized);
+  analysis.pixels = buildPixelMaps(
+    analysis,
+    mask,
+    normalized,
+    flowGuideField
+  );
   return analysis;
 }
 
@@ -1318,6 +1835,7 @@ export function analysisSignature(settings) {
     s.quality,
     s.carefulMeasurement ? "careful" : "fast",
     s.perElement ? "elements" : "whole",
+    s.useFlowGuides ? `guides-${s.flowGuideMode}` : "guides-off",
   ].join("|");
 }
 
