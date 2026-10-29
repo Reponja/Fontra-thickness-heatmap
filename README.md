@@ -98,36 +98,6 @@ Per-element mode is optional because it runs one analysis per element. Complex
 glyphs with many contours take longer, especially with careful measurement on;
 use a lower **Analysis detail** setting if it feels sluggish.
 
-## Flow guides
-
-You can draw guide lines over the glyph to tell the measurement which way a
-stroke flows. This is useful where the outline alone is ambiguous: a junction,
-a curved bowl, a flared terminal, or a serif.
-
-![Blue guide lines crossing black letter strokes](docs/flow-guides.png)
-
-- In the **Flow guides** section, press **Draw guides**.
-- Drag across a stroke. The plugin measures the ink span along the line and
-  uses the perpendicular as the local stroke direction. The blue line is a
-  manual caliper, not part of the glyph.
-- Hold **Shift** for a straight line. Press **Esc** when you are done drawing.
-- **Guide line → Along the stroke** switches the interpretation: the line's own
-  direction becomes the flow instead of its perpendicular. Draw down the middle
-  of a stroke in that mode.
-- **Use guides in measurement** applies the guides to the pen model. Turn it
-  off to compare the same glyph without them.
-- **Show guides** controls only the blue overlay, so hidden guides can still be
-  active.
-- **Undo guide** removes the last line on the glyph. **Clear glyph** removes all
-  of them.
-
-Guide influence fades out away from each line, so an isolated guide affects its
-local stroke rather than repainting the whole glyph. Draw as many lines as the
-shape needs. In across-stroke mode a guide also supplies a manual thickness
-reading, which is useful when the automatic caliper is unsure at a terminal or
-junction. Guides are stored in this browser per glyph; they are not written into
-the font file. Undo/redo in Fontra does not include guide edits.
-
 ## Pen models
 
 All three models use the vertical stem as the reference thickness. For
@@ -223,13 +193,7 @@ element’s measurements are computed from its own mask.
 8. Smooth the width field, and smooth stroke direction as a doubled-angle
    vector field. The model target is derived from that smoothed direction, so
    the target and deviation fields vary continuously across curves.
-9. If flow guides are present, build a nearest-guide field with a smooth local
-   falloff. In across-stroke mode, the guide's ink span supplies a manual
-   caliper width, and its perpendicular supplies the flow direction. In
-   along-stroke mode, only the direction is taken from the line. Manual guides
-   take precedence over the inferred field near the line and hand back to it
-   with distance.
-10. Render the selected display mode.
+9. Render the selected display mode.
 
 A cached analysis keyed by the path and model settings keeps normal editing
 interactive. Cosmetic changes such as overlay opacity or display mode reuse the
@@ -269,16 +233,6 @@ same analysis.
   element(s), or the hovered element.
 - **Fade other elements** — keep non-focused elements visible at 12% opacity;
   turn off to hide them entirely.
-- **Flow guides → Draw guides** — draw guide lines on the current glyph.
-  Hold Shift for a straight guide; Esc finishes drawing.
-- **Flow guides → Guide line** — treat a guide as a cross-section (**Across the
-  stroke**, the default) or as a centreline (**Along the stroke**).
-- **Flow guides → Use guides in measurement** — include or ignore the guides in
-  the analysis without deleting them.
-- **Flow guides → Show guides** — show or hide the blue overlay independently of
-  whether the guides affect the measurement.
-- **Flow guides → Undo guide / Clear glyph** — remove the last guide or all
-  guides from the current glyph.
 
 ## Scope and limitations
 
@@ -307,12 +261,6 @@ same analysis.
   components first.
 - Per-element mode runs one analysis per element, so glyphs with many contours
   take longer than whole-glyph mode, particularly with careful measurement on.
-- Flow guides are stored in the browser's local storage per glyph name, not in
-  the font. They are not shared between machines and do not participate in
-  Fontra's undo/redo. A guide drawn in across-stroke mode is a manual
-  measurement: if it is aimed along a stroke instead of across it, the long
-  chord will become a thick manual reading. Switch to **Along the stroke** for
-  centreline guides.
 
 ## Development
 
@@ -345,10 +293,7 @@ developing the color maps.
   per-element grouping for components and counters.
 - `src/engine.js` — browser rasterization, per-element crops and compositing,
   caching, and Fontra-facing analysis.
-- `src/guides.js` — flow-guide normalization, simplification, fingerprints, and
-  browser-local persistence.
-- `src/panel.js` — the sidebar controls, guide drawing, legend, and glyph
-  summary.
+- `src/panel.js` — the sidebar controls, legend, and glyph summary.
 - `src/ui.js` — self-contained UI primitives (panel base, DOM helpers, and
   settings persistence) so the plugin does not depend on Fontra’s internal
   module paths.

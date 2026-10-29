@@ -20,18 +20,6 @@ import {
 } from "./colormap.js";
 import { thicknessEngine } from "./engine.js";
 import { LAYER_ID, PANEL_IDENTIFIER } from "./constants.js";
-import {
-  FLOW_GUIDE_MODES,
-  FlowGuideStore,
-  flowGuideLength,
-  simplifyFlowGuide,
-} from "./guides.js";
-
-const FLOW_GUIDE_STORAGE_KEY = "fontra.thickness-heatmap.flow-guides.v1";
-const GUIDE_CANVAS_BOUND = Symbol.for("fontra.thicknessHeatmap.guideCanvasBound");
-const GUIDE_HANDLE_RADIUS = 3.2;
-const GUIDE_LINE_WIDTH = 2.2;
-const GUIDE_HALO_WIDTH = 4.8;
 
 const DISPLAY_MODE_LABELS = {
   deviation: "Deviation from model",
@@ -55,11 +43,6 @@ const ELEMENT_FOCUS_LABELS = {
   all: "All elements",
   selected: "Selected element(s)",
   hovered: "Hovered element",
-};
-
-const FLOW_GUIDE_MODE_LABELS = {
-  across: "Across the stroke",
-  along: "Along the stroke",
 };
 
 function fmt(value, digits = 1) {
@@ -217,18 +200,6 @@ export default class ThicknessHeatmapPanel extends Panel {
       opacity: 0.55;
     }
 
-    button.guide-draw-button.active {
-      background: var(--fontra-red-color);
-      color: #fff;
-    }
-
-    .guide-status {
-      min-height: 1.2em;
-      font-size: 0.86em;
-      opacity: 0.72;
-      font-variant-numeric: tabular-nums;
-    }
-
     .legend {
       display: flex;
       flex-direction: column;
@@ -346,22 +317,6 @@ export default class ThicknessHeatmapPanel extends Panel {
     editorController?.visualizationLayersSettings?.addListener(
       this._layerSettingsListener
     );
-
-    this._sceneSettingsController =
-      editorController?.sceneController?.sceneSettingsController;
-    this._guideGlyphListener = (event) => {
-      if (event.key !== "selectedGlyph") {
-        return;
-      }
-      if (this._guideDrawing) {
-        this._stopGuideDrawing();
-      }
-      this._updateGuideStatus();
-    };
-    this._sceneSettingsController?.addKeyListener(
-      "selectedGlyph",
-      this._guideGlyphListener
-    );
   }
 
   get model() {
@@ -374,11 +329,6 @@ export default class ThicknessHeatmapPanel extends Panel {
 
     this._sliders = {};
     this._controls = {};
-    this._guideStore = new FlowGuideStore(FLOW_GUIDE_STORAGE_KEY);
-    this._guideDrawing = false;
-    this._guideDraft = null;
-    this._guideDraftGlyphName = null;
-    this._guideCanvas = null;
 
     const icon = span({ class: "panel-icon", "aria-hidden": "true" }, ["◒"]);
     const title = div({ class: "title" }, ["Thickness heatmap"]);
@@ -745,107 +695,6 @@ export default class ThicknessHeatmapPanel extends Panel {
       this.elementStatus,
     ]);
 
-    const useGuidesCheckbox = input({
-      type: "checkbox",
-      checked: this.model.useFlowGuides,
-      onchange: (event) => {
-        this.model.useFlowGuides = event.target.checked;
-      },
-    });
-    this._controls.useGuidesCheckbox = useGuidesCheckbox;
-
-    const showGuidesCheckbox = input({
-      type: "checkbox",
-      checked: this.model.showFlowGuides,
-      onchange: (event) => {
-        this.model.showFlowGuides = event.target.checked;
-        this._requestGuideUpdate();
-      },
-    });
-    this._controls.showGuidesCheckbox = showGuidesCheckbox;
-
-    const guideModeSelect = select(
-      {
-        class: "select-input",
-        onchange: (event) => {
-          this.model.flowGuideMode = event.target.value;
-        },
-      },
-      FLOW_GUIDE_MODES.map((mode) =>
-        option(
-          {
-            value: mode,
-            selected: this.model.flowGuideMode === mode,
-          },
-          [FLOW_GUIDE_MODE_LABELS[mode]]
-        )
-      )
-    );
-    guideModeSelect.id = "thickness-guide-mode";
-    this._controls.guideModeSelect = guideModeSelect;
-
-    const drawGuideButton = button(
-      {
-        type: "button",
-        class: "guide-draw-button",
-        title: "Draw a flow guide on the selected glyph",
-        onclick: () => this._toggleGuideDrawing(),
-      },
-      ["Draw guides"]
-    );
-    this._controls.drawGuideButton = drawGuideButton;
-
-    const undoGuideButton = button(
-      {
-        type: "button",
-        title: "Remove the last flow guide on this glyph",
-        onclick: () => this._undoLastGuide(),
-      },
-      ["Undo guide"]
-    );
-    this._controls.undoGuideButton = undoGuideButton;
-
-    const clearGuideButton = button(
-      {
-        type: "button",
-        title: "Remove all flow guides from this glyph",
-        onclick: () => this._clearGuides(),
-      },
-      ["Clear glyph"]
-    );
-    this._controls.clearGuideButton = clearGuideButton;
-
-    const guideStatus = div({ class: "guide-status" }, []);
-    this.guideStatus = guideStatus;
-    const guideHelp = div({ class: "help" }, []);
-    this.guideHelp = guideHelp;
-
-    const flowGuideSection = div({ class: "panel-section" }, [
-      div({ class: "section-heading" }, ["Flow guides"]),
-      div({ class: "help" }, [
-        "Draw a line across a stroke (or along it) to tell the pen model which way the stroke flows. The blue line is not part of the glyph. Hold Shift for a straight guide.",
-      ]),
-      div({ class: "field-row" }, [
-        label({ for: "thickness-guide-mode" }, ["Guide line"]),
-        guideModeSelect,
-      ]),
-      guideHelp,
-      label({ class: "checkbox-row" }, [
-        useGuidesCheckbox,
-        span({}, ["Use guides in measurement"]),
-      ]),
-      label({ class: "checkbox-row" }, [
-        showGuidesCheckbox,
-        span({}, ["Show guides"]),
-      ]),
-      div({ class: "inline-buttons" }, [
-        drawGuideButton,
-        undoGuideButton,
-        clearGuideButton,
-      ]),
-      guideStatus,
-    ]);
-
     const displaySection = div({ class: "panel-section" }, [
       div({ class: "section-heading" }, ["Display"]),
       div({ class: "field-row" }, [
@@ -942,7 +791,6 @@ export default class ThicknessHeatmapPanel extends Panel {
       modelSection,
       displaySection,
       elementsSection,
-      flowGuideSection,
       legendSection,
       statsSection,
       this.statusLine,
@@ -956,11 +804,7 @@ export default class ThicknessHeatmapPanel extends Panel {
       this.editorController.canvasController.requestUpdate();
     });
 
-    this._setupGuideDrawing();
-    requestAnimationFrame(() => {
-      this._syncControls();
-      this._updateGuideStatus();
-    });
+    requestAnimationFrame(() => this._syncControls());
 
     return panel;
   }
@@ -1144,34 +988,8 @@ export default class ThicknessHeatmapPanel extends Panel {
         deviationMode ? "grid" : "none";
     }
 
-    if (!settings.enabled && this._guideDrawing) {
-      this._stopGuideDrawing();
-    }
-    if (this._controls.guideModeSelect) {
-      this._controls.guideModeSelect.value = settings.flowGuideMode;
-      this._controls.guideModeSelect.disabled =
-        !settings.useFlowGuides || !settings.enabled;
-    }
-    if (this._controls.useGuidesCheckbox) {
-      this._controls.useGuidesCheckbox.checked = settings.useFlowGuides;
-    }
-    if (this._controls.showGuidesCheckbox) {
-      this._controls.showGuidesCheckbox.checked = settings.showFlowGuides;
-    }
-    if (this.guideHelp) {
-      this.guideHelp.textContent =
-        settings.flowGuideMode === "along"
-          ? "Draw down the middle of a stroke. The line’s own direction becomes the stroke flow."
-          : "Draw across a stroke. The ink span along the line becomes a manual thickness reading, and the perpendicular becomes the stroke flow.";
-    }
-    if (this._controls.drawGuideButton) {
-      this._controls.drawGuideButton.disabled =
-        !settings.enabled || !this._selectedGlyphName();
-    }
-
     this._applyLayerEnabled(settings.enabled);
     this._updateElementStatus(thicknessEngine.lastAnalysis);
-    this._updateGuideStatus();
   }
 
   _applyLayerEnabled(enabled) {
@@ -1329,339 +1147,6 @@ export default class ThicknessHeatmapPanel extends Panel {
     this.elementStatus.textContent = `${count} ${noun} measured independently.${hint}`;
   }
 
-  _selectedGlyphName() {
-    const sceneController = this.editorController?.sceneController;
-    const selectedGlyph = sceneController?.sceneSettings?.selectedGlyph;
-    if (selectedGlyph && !selectedGlyph.isEditing) {
-      return null;
-    }
-    return (
-      sceneController?.getSelectedGlyphName?.() ??
-      sceneController?.sceneModel?.getSelectedGlyphName?.() ??
-      sceneController?.sceneSettings?.selectedGlyphName ??
-      null
-    );
-  }
-
-  getFlowGuidesForGlyphName(glyphName) {
-    if (!this._guideStore) {
-      return [];
-    }
-    return this._guideStore.get(glyphName || this._selectedGlyphName());
-  }
-
-  _guidePixelUnit() {
-    return this.editorController?.canvasController?.onePixelUnit || 1;
-  }
-
-  _requestGuideUpdate() {
-    this.editorController?.canvasController?.requestUpdate?.();
-    this.editorController?.visualizationLayers?.requestUpdate?.();
-  }
-
-  _setupGuideDrawing() {
-    const canvas = this.editorController?.canvasController?.canvas;
-    if (!canvas || canvas[GUIDE_CANVAS_BOUND]) {
-      return;
-    }
-    canvas[GUIDE_CANVAS_BOUND] = true;
-    this._guideCanvas = canvas;
-    this._boundGuideMouseDown = (event) => this._handleGuideMouseDown(event);
-    this._boundGuideMouseMove = (event) => this._handleGuideMouseMove(event);
-    this._boundGuideMouseUp = (event) => this._handleGuideMouseUp(event);
-    this._boundGuideKeyDown = (event) => this._handleGuideKeyDown(event);
-    this._boundGuideWindowBlur = () => {
-      if (!this._guideDraft) {
-        return;
-      }
-      this._guideDraft = null;
-      this._guideDraftGlyphName = null;
-      this._requestGuideUpdate();
-      this._updateGuideStatus();
-    };
-
-    // Capture-phase listeners keep Fontra's own tools from seeing the drag.
-    canvas.addEventListener("mousedown", this._boundGuideMouseDown, true);
-    window.addEventListener("mousemove", this._boundGuideMouseMove, true);
-    window.addEventListener("mouseup", this._boundGuideMouseUp, true);
-    window.addEventListener("keydown", this._boundGuideKeyDown, true);
-    window.addEventListener("blur", this._boundGuideWindowBlur, true);
-  }
-
-  _glyphPointFromEvent(event) {
-    const sceneController = this.editorController?.sceneController;
-    const point = sceneController?.selectedGlyphPoint?.(event);
-    if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
-      return null;
-    }
-    return { x: point.x, y: point.y };
-  }
-
-  _handleGuideMouseDown(event) {
-    if (!this._guideDrawing || event.button !== 0) {
-      return;
-    }
-    const glyphName = this._selectedGlyphName();
-    const point = this._glyphPointFromEvent(event);
-    if (!glyphName || !point) {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    this._guideDraftGlyphName = glyphName;
-    this._guideDraft = [point];
-    this._requestGuideUpdate();
-  }
-
-  _handleGuideMouseMove(event) {
-    if (!this._guideDrawing || !this._guideDraft) {
-      return;
-    }
-    const point = this._glyphPointFromEvent(event);
-    if (!point) {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-
-    const start = this._guideDraft[0];
-    if (event.shiftKey) {
-      // Shift gives a clean straight cross-section, which is usually what a
-      // manual caliper wants.
-      this._guideDraft = [start, point];
-    } else {
-      const last = this._guideDraft[this._guideDraft.length - 1];
-      const minimumStep = this._guidePixelUnit() * 1.2;
-      if (Math.hypot(point.x - last.x, point.y - last.y) >= minimumStep) {
-        this._guideDraft.push(point);
-      }
-    }
-    this._requestGuideUpdate();
-  }
-
-  _handleGuideMouseUp(event) {
-    if (!this._guideDrawing || !this._guideDraft) {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    this._finishGuideDraft();
-  }
-
-  _handleGuideKeyDown(event) {
-    if (!this._guideDrawing || event.key !== "Escape") {
-      return;
-    }
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    if (this._guideDraft) {
-      this._guideDraft = null;
-      this._guideDraftGlyphName = null;
-      this._requestGuideUpdate();
-      this._updateGuideStatus();
-    } else {
-      this._stopGuideDrawing();
-    }
-  }
-
-  _finishGuideDraft() {
-    const rawPoints = this._guideDraft || [];
-    const glyphName =
-      this._guideDraftGlyphName || this._selectedGlyphName() || null;
-    this._guideDraft = null;
-    this._guideDraftGlyphName = null;
-
-    const pixelUnit = this._guidePixelUnit();
-    const points = simplifyFlowGuide(rawPoints, pixelUnit * 1.25);
-    if (
-      !glyphName ||
-      points.length < 2 ||
-      flowGuideLength(points) < pixelUnit * 6
-    ) {
-      this._requestGuideUpdate();
-      this._updateGuideStatus();
-      if (this.guideStatus) {
-        this.guideStatus.textContent =
-          "Guide was too short. Drag across a stroke, or hold Shift for a straight line.";
-      }
-      return;
-    }
-
-    this._guideStore.add(glyphName, points);
-    this.statusLine.textContent = `Added a flow guide to “${glyphName}”.`;
-    this._requestGuideUpdate();
-    this._updateGuideStatus();
-  }
-
-  _toggleGuideDrawing() {
-    if (this._guideDrawing) {
-      this._stopGuideDrawing();
-    } else {
-      this._startGuideDrawing();
-    }
-  }
-
-  _startGuideDrawing() {
-    if (this.model.enabled === false) {
-      this.statusLine.textContent = "Turn the heatmap on before drawing guides.";
-      return;
-    }
-    if (!this._selectedGlyphName()) {
-      this.statusLine.textContent = "Select an editing glyph first.";
-      return;
-    }
-    this._guideDrawing = true;
-    if (this._guideCanvas) {
-      this._previousGuideCursor = this._guideCanvas.style.cursor;
-      this._guideCanvas.style.cursor = "crosshair";
-    }
-    this._requestGuideUpdate();
-    this._updateGuideStatus();
-  }
-
-  _stopGuideDrawing() {
-    this._guideDrawing = false;
-    this._guideDraft = null;
-    this._guideDraftGlyphName = null;
-    if (this._guideCanvas) {
-      this._guideCanvas.style.cursor = this._previousGuideCursor || "";
-    }
-    this._requestGuideUpdate();
-    this._updateGuideStatus();
-  }
-
-  _undoLastGuide() {
-    const glyphName = this._selectedGlyphName();
-    if (!glyphName) {
-      return;
-    }
-    this._guideStore.undoLast(glyphName);
-    this._requestGuideUpdate();
-    this._updateGuideStatus();
-  }
-
-  _clearGuides() {
-    const glyphName = this._selectedGlyphName();
-    if (!glyphName) {
-      return;
-    }
-    this._guideStore.clear(glyphName);
-    this._requestGuideUpdate();
-    this._updateGuideStatus();
-  }
-
-  _updateGuideStatus() {
-    if (!this.guideStatus || !this._guideStore) {
-      return;
-    }
-    const glyphName = this._selectedGlyphName();
-    const guides = glyphName ? this._guideStore.get(glyphName) : [];
-    const count = guides.length;
-    const noun = count === 1 ? "guide" : "guides";
-
-    if (!glyphName) {
-      this.guideStatus.textContent = "Select an editing glyph to draw guides.";
-    } else if (this._guideDrawing) {
-      this.guideStatus.textContent = count
-        ? `${count} ${noun} on “${glyphName}”. Drag to add another; Esc finishes.`
-        : `Drag across the stroke on “${glyphName}”. Hold Shift for a straight line; Esc finishes.`;
-    } else if (count) {
-      this.guideStatus.textContent = `${count} ${noun} on “${glyphName}”.`;
-    } else {
-      this.guideStatus.textContent = `No flow guides on “${glyphName}”.`;
-    }
-
-    if (this._controls.drawGuideButton) {
-      const drawButton = this._controls.drawGuideButton;
-      drawButton.textContent = this._guideDrawing ? "Done drawing" : "Draw guides";
-      drawButton.classList.toggle("active", this._guideDrawing);
-      drawButton.disabled = !glyphName || this.model.enabled === false;
-    }
-    if (this._controls.undoGuideButton) {
-      this._controls.undoGuideButton.disabled = !count;
-    }
-    if (this._controls.clearGuideButton) {
-      this._controls.clearGuideButton.disabled = !count;
-    }
-  }
-
-  drawFlowGuides(context, positionedGlyph, glyphName) {
-    if (!context) {
-      return;
-    }
-    const name = glyphName || this._selectedGlyphName();
-    if (!name) {
-      return;
-    }
-    const showGuides = this.model.showFlowGuides !== false;
-    const draft =
-      this._guideDraft && this._guideDraftGlyphName === name
-        ? this._guideDraft
-        : null;
-    const guides = showGuides ? this._guideStore.get(name) : [];
-    const allGuides = draft && draft.length >= 2
-      ? [...guides, draft]
-      : guides;
-    if (!allGuides.length) {
-      return;
-    }
-
-    const pixelUnit = this._guidePixelUnit();
-    // The visualization layer has already translated the context to this
-    // positioned glyph, so guide points are used directly in glyph coordinates.
-    context.save();
-    context.lineCap = "round";
-    context.lineJoin = "round";
-
-    const traceGuide = (points) => {
-      context.beginPath();
-      context.moveTo(points[0].x, points[0].y);
-      for (let i = 1; i < points.length; i++) {
-        context.lineTo(points[i].x, points[i].y);
-      }
-      context.stroke();
-    };
-
-    // A light halo keeps the blue guides readable over both warm and cool
-    // heatmap colors.
-    context.strokeStyle = "rgba(255, 255, 255, 0.88)";
-    context.lineWidth = GUIDE_HALO_WIDTH * pixelUnit;
-    for (const points of allGuides) {
-      traceGuide(points);
-    }
-
-    context.strokeStyle = "#0a84ff";
-    context.lineWidth = GUIDE_LINE_WIDTH * pixelUnit;
-    for (const points of guides) {
-      traceGuide(points);
-    }
-    if (draft && draft.length >= 2) {
-      context.setLineDash([5 * pixelUnit, 4 * pixelUnit]);
-      traceGuide(draft);
-      context.setLineDash([]);
-    }
-
-    context.lineWidth = Math.max(1, 1.4 * pixelUnit);
-    for (const points of allGuides) {
-      for (const point of [points[0], points[points.length - 1]]) {
-        context.beginPath();
-        context.arc(
-          point.x,
-          point.y,
-          GUIDE_HANDLE_RADIUS * pixelUnit,
-          0,
-          Math.PI * 2
-        );
-        context.fillStyle = "#fff";
-        context.fill();
-        context.strokeStyle = "#0a84ff";
-        context.stroke();
-      }
-    }
-
-    context.restore();
-  }
-
   _fitThicknesses() {
     const positionedGlyph =
       this.editorController.sceneController?.sceneModel?.getSelectedPositionedGlyph();
@@ -1669,13 +1154,7 @@ export default class ThicknessHeatmapPanel extends Panel {
       this.statusLine.textContent = "Select an editing glyph first.";
       return;
     }
-    const glyphName =
-      positionedGlyph?.glyph?.name ?? this._selectedGlyphName();
-    const estimate = thicknessEngine.fitThicknesses(
-      positionedGlyph,
-      this.model,
-      { flowGuides: this.getFlowGuidesForGlyphName(glyphName) }
-    );
+    const estimate = thicknessEngine.fitThicknesses(positionedGlyph, this.model);
     if (!estimate?.vertical) {
       this.statusLine.textContent =
         "Could not find a reliable near-vertical stroke; adjust the thickness manually.";

@@ -1029,10 +1029,9 @@ async function processRepo(dir, options, state) {
     await delay(waitMs);
   }
 
-  // A throttled or unreachable purge request does not mean the CDN is stale.
-  // Check the bytes jsDelivr actually serves before reporting a failure, so a
-  // run is not marked failed (and state is not held back) when the content is
-  // current.
+  // A throttled purge request does not mean the CDN is stale. Check the bytes
+  // jsDelivr actually serves before reporting a failure, so a run is not
+  // marked failed (and state is not held back) when the content is current.
   let alreadyCurrent = 0;
   let unserved = 0;
   const pendingRoots = [];
@@ -1043,10 +1042,7 @@ async function processRepo(dir, options, state) {
     if (aliasUrlSet.has(entry.url)) {
       continue;
     }
-    if (!entry.throttled && entry.status !== null) {
-      // A definitive HTTP failure (for example a 500 from the purge endpoint)
-      // is a real failure. A transport error has no status: fall through to
-      // the CDN byte check, because the purge may have succeeded anyway.
+    if (!entry.throttled) {
       realFailed.push(entry);
       continue;
     }
