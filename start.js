@@ -3,6 +3,7 @@ import { thicknessEngine } from "./src/engine.js";
 import ThicknessHeatmapPanel from "./src/panel.js";
 
 const LAYER_Z_INDEX = 300;
+const HOVER_BOUND = Symbol.for("fontra.thicknessHeatmap.hoverBound");
 
 export function start(editorController, pluginPath) {
   ThicknessHeatmapPanel.prototype.iconPath = `${pluginPath}/icon.svg`;
@@ -45,7 +46,32 @@ export function start(editorController, pluginPath) {
     return;
   }
 
+  let pointerInsideCanvas = false;
+
   if (!definitions.some((layer) => layer.identifier === LAYER_ID)) {
+    const getFocusContext = (positionedGlyph) => {
+      const sceneController = panel.editorController?.sceneController;
+      const sceneModel = sceneController?.sceneModel;
+      const localPoint = sceneController?.localPoint?.();
+      const glyphPoint =
+        pointerInsideCanvas && localPoint && positionedGlyph
+          ? {
+              x: localPoint.x - positionedGlyph.x,
+              y: localPoint.y - positionedGlyph.y,
+            }
+          : null;
+      return {
+        selection: sceneModel?.selection,
+        hoverSelection: pointerInsideCanvas
+          ? sceneModel?.hoverSelection
+          : null,
+        hoverPathHit: pointerInsideCanvas
+          ? sceneController?.hoverPathHit
+          : null,
+        glyphPoint,
+      };
+    };
+
     const definition = {
       identifier: LAYER_ID,
       name: "Thickness heatmap",
@@ -63,7 +89,11 @@ export function start(editorController, pluginPath) {
         if (!analysis) {
           return;
         }
-        const image = thicknessEngine.getImage(analysis, settings);
+        const image = thicknessEngine.getImage(
+          analysis,
+          settings,
+          getFocusContext(positionedGlyph)
+        );
         if (!image) {
           return;
         }
@@ -88,6 +118,40 @@ export function start(editorController, pluginPath) {
       index = definitions.length;
     }
     definitions.splice(index, 0, definition);
+  }
+
+  // Hover-focus needs a redraw even when Fontra's hover selection does not
+  // change, for example while the pointer moves inside a filled shape.
+  const canvas = editorController.canvasController?.canvas;
+  if (canvas && !canvas[HOVER_BOUND]) {
+    canvas[HOVER_BOUND] = true;
+    let pending = false;
+    const requestHoverUpdate = (event) => {
+      const model = panel.controller?.model;
+      if (!model?.perElement || model.elementFocus !== "hovered") {
+        return;
+      }
+      if (event) {
+        pointerInsideCanvas = true;
+        panel.editorController?.sceneController?.localPoint?.(event);
+      }
+      if (pending) {
+        return;
+      }
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        panel.editorController?.canvasController?.requestUpdate();
+      });
+    };
+    canvas.addEventListener("pointermove", requestHoverUpdate);
+    canvas.addEventListener("pointerenter", () => {
+      pointerInsideCanvas = true;
+    });
+    canvas.addEventListener("pointerleave", () => {
+      pointerInsideCanvas = false;
+      requestHoverUpdate();
+    });
   }
 
   // The visualization-layers object was created before this plugin registered

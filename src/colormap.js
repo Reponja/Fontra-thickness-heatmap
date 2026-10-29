@@ -103,10 +103,13 @@ function normalizeRange(min, max) {
 /**
  * Turn an analysis into a transparent RGBA image. The image uses the same
  * y-up row order as the mask; Fontra's y-up canvas will draw it correctly.
+ *
+ * `stats` can be supplied when several per-element analyses must share one
+ * color range. Without it, the analysis normalizes to its own samples.
  */
-export function renderHeatmapRGBA(analysis, settings) {
+export function renderHeatmapRGBA(analysis, settings, stats = analysis.stats) {
   const s = normalizeSettings(settings);
-  const { width, height, mask, pixels, stats } = analysis;
+  const { width, height, mask, pixels } = analysis;
   const data = new Uint8ClampedArray(width * height * 4);
   const scaleRange = Math.max(s.scaleRange, 0.001);
   const [actualMin, actualMax] = normalizeRange(stats.actualMin, stats.actualMax);

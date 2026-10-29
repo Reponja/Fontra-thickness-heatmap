@@ -10,6 +10,7 @@
 
 export const MODEL_TYPES = ["translation", "expansion", "monoline"];
 export const DISPLAY_MODES = ["deviation", "target", "measured", "outliers"];
+export const ELEMENT_FOCUS_MODES = ["all", "selected", "hovered"];
 
 export const QUALITY_DIMENSIONS = {
   fast: 320,
@@ -39,6 +40,9 @@ export const DEFAULT_SETTINGS = {
   palette: "accessible",
   fadeLowConfidence: true,
   carefulMeasurement: true,
+  perElement: false,
+  elementFocus: "all",
+  fadeOtherElements: true,
 };
 
 const DEG = Math.PI / 180;
@@ -111,6 +115,11 @@ export function normalizeSettings(settings = {}) {
       : DEFAULT_SETTINGS.palette,
     fadeLowConfidence: settings.fadeLowConfidence !== false,
     carefulMeasurement: settings.carefulMeasurement !== false,
+    perElement: settings.perElement === true,
+    elementFocus: ELEMENT_FOCUS_MODES.includes(settings.elementFocus)
+      ? settings.elementFocus
+      : DEFAULT_SETTINGS.elementFocus,
+    fadeOtherElements: settings.fadeOtherElements !== false,
   };
 }
 
@@ -812,7 +821,7 @@ function quantileSorted(sorted, q) {
   return sorted[lower] * (1 - fraction) + sorted[upper] * fraction;
 }
 
-function summarizeSamples(samples, tolerance) {
+export function summarizeSamples(samples, tolerance) {
   const accepted = [];
   for (let i = 0; i < samples.confidence.length; i++) {
     if (samples.confidence[i] >= CONFIDENCE_ACCEPT && samples.actual[i] > 0) {
@@ -920,11 +929,13 @@ function smoothBoundarySamples(
   boundaryToSample,
   width,
   height,
-  settings
+  settings,
+  radiusOverride
 ) {
   const smoothed = createSampleStore(samples.pointCount);
   const careful = settings.carefulMeasurement;
-  const radius = clamp(Math.round(Math.min(width, height) / 120), 3, 8);
+  const radius =
+    radiusOverride ?? clamp(Math.round(Math.min(width, height) / 120), 3, 8);
   // A wider window is needed to notice that the two sides of a junction meet
   // at a sharp angle. The smoothing radius itself stays small so ordinary
   // curves are not flattened.
@@ -1047,7 +1058,7 @@ function smoothBoundarySamples(
  * @param {object} settings Heatmap settings.
  * @param {number} scale Raster pixels per font unit.
  */
-export function analyzeMask(mask, width, height, settings, scale) {
+export function analyzeMask(mask, width, height, settings, scale, options = {}) {
   const normalized = normalizeSettings(settings);
   const boundary = extractBoundary(mask, width, height);
   const { distance, nearest } = distanceTransform(boundary, width, height);
@@ -1055,7 +1066,11 @@ export function analyzeMask(mask, width, height, settings, scale) {
   const boundaryToSample = new Int32Array(width * height);
   boundaryToSample.fill(-1);
 
-  const blurRadius = clamp(Math.round(Math.min(width, height) / 120), 3, 8);
+  // Per-element crops must use the same blur/smoothing radius as the whole
+  // glyph, otherwise the same stroke would be smoothed differently depending
+  // on how much empty space surrounds its element.
+  const blurRadius =
+    options.blurRadius ?? clamp(Math.round(Math.min(width, height) / 120), 3, 8);
   const coverage = boxBlurMask(mask, width, height, blurRadius);
 
   for (let y = 0; y < height; y++) {
@@ -1194,7 +1209,8 @@ export function analyzeMask(mask, width, height, settings, scale) {
     boundaryToSample,
     width,
     height,
-    normalized
+    normalized,
+    blurRadius
   );
   boundaryToSample.fill(-1);
   for (let i = 0; i < samples.pointCount; i++) {
@@ -1301,6 +1317,7 @@ export function analysisSignature(settings) {
     s.tolerance.toFixed(3),
     s.quality,
     s.carefulMeasurement ? "careful" : "fast",
+    s.perElement ? "elements" : "whole",
   ].join("|");
 }
 
@@ -1314,5 +1331,8 @@ export function renderSignature(settings) {
     s.scaleRange.toFixed(3),
     s.opacity.toFixed(3),
     s.fadeLowConfidence ? "1" : "0",
+    s.perElement ? "elements" : "whole",
+    s.elementFocus,
+    s.fadeOtherElements ? "fade" : "hide",
   ].join("|");
 }

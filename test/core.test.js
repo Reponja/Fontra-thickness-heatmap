@@ -160,6 +160,26 @@ test("normalization constrains UI values to safe ranges", () => {
   assert.equal(settings.quality, "balanced");
 });
 
+test("per-element settings are normalized and validated", () => {
+  const defaults = normalizeSettings({});
+  assert.equal(defaults.perElement, false);
+  assert.equal(defaults.elementFocus, "all");
+  assert.equal(defaults.fadeOtherElements, true);
+
+  const custom = normalizeSettings({
+    perElement: true,
+    elementFocus: "hovered",
+    fadeOtherElements: false,
+  });
+  assert.equal(custom.perElement, true);
+  assert.equal(custom.elementFocus, "hovered");
+  assert.equal(custom.fadeOtherElements, false);
+
+  assert.equal(normalizeSettings({ elementFocus: "nonsense" }).elementFocus, "all");
+  // Only an explicit true enables per-element measurement.
+  assert.equal(normalizeSettings({ perElement: "true" }).perElement, false);
+});
+
 test("heatmap can be switched off without losing its other settings", () => {
   assert.equal(normalizeSettings({}).enabled, true);
   assert.equal(normalizeSettings({ enabled: false }).enabled, false);

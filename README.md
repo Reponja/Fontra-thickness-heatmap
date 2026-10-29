@@ -68,6 +68,36 @@ corrections are dominating the map. The **glyph summary** reports the median
 measured thickness, model target, deviation range, and how much of the contour
 falls inside the tolerance.
 
+### Per-element measurement
+
+By default the plugin measures the glyph as one filled shape, so overlapping
+contours share their junction. Enable **Measure each element separately** in the
+**Elements** section when a letter is assembled from separate contours or
+components — for example an `i` dot, a `B` built from a stem and two bowls, or
+a component-based `é`. Each contour or component is rasterized and measured on
+its own, so a stem's measurement cannot leak into an adjacent bowl.
+
+- Counters and holes stay part of their parent element and are cut out before
+  measurement.
+- An island inside a counter is its own element.
+- Overlapping contours remain separate elements; they are not treated as holes.
+- A letter drawn as a single contour is still one element, so its junctions are
+  measured together. Per-element mode cannot separate subpaths that were joined
+  into one contour.
+- Components are measured in their transformed position; a component with a
+  counter keeps its hole.
+
+Use **Show** to choose **All elements**, **Selected element(s)**, or **Hovered
+element**. With a focused selection, other elements are faded to 12% opacity, or
+hidden when **Fade other elements** is off. Selection focus follows point and
+component selection in the glyph editor; hover focus follows the pointer,
+including components. The panel summary and the color range still use all
+measured elements, so colors remain comparable when you switch focus.
+
+Per-element mode is optional because it runs one analysis per element. Complex
+glyphs with many contours take longer, especially with careful measurement on;
+use a lower **Analysis detail** setting if it feels sluggish.
+
 ## Pen models
 
 All three models use the vertical stem as the reference thickness. For
@@ -128,7 +158,10 @@ weight changes are consistent, or as a neutral reference.
 
 The plugin rasterizes the glyph’s live `flattenedPath2d` at the selected
 analysis detail, so components, overlaps, and counters are handled by the
-ordinary fill rule.
+ordinary fill rule. In per-element mode it rasterizes each grouped contour or
+component into a padded crop instead, and runs the same pipeline with a shared
+blur radius and a shared color range. The crops overlap only for display; each
+element’s measurements are computed from its own mask.
 
 1. Build a binary ink mask with a small margin, then blur it into a coverage
    field.
@@ -194,6 +227,12 @@ same analysis.
 - **Careful curve & junction measurement** — traces strokes from both sides and
   rejects chords across curves and junctions. Slower; turn it off for a quick
   read.
+- **Measure each element separately** — analyze every contour and component on
+  its own. Off by default; see [Per-element measurement](#per-element-measurement).
+- **Elements → Show** — with per-element mode, choose all elements, selected
+  element(s), or the hovered element.
+- **Fade other elements** — keep non-focused elements visible at 12% opacity;
+  turn off to hide them entirely.
 
 ## Scope and limitations
 
@@ -215,6 +254,13 @@ same analysis.
 - Latin-style outlines are the initial focus; CJK and highly complex
   calligraphic structures may need tuning of the detail level and confidence
   threshold.
+- Per-element grouping is topology-based. A self-intersecting contour, a
+  same-winding nested contour, or subpaths joined into a single contour are
+  treated conservatively: they are not split into separate shapes. If a letter
+  must be separated at a junction, split the outline into contours or
+  components first.
+- Per-element mode runs one analysis per element, so glyphs with many contours
+  take longer than whole-glyph mode, particularly with careful measurement on.
 
 ## Development
 
@@ -243,13 +289,17 @@ developing the color maps.
 - `src/core.js` — model math, masks, distance transforms, caliper measurement,
   confidence, and statistics.
 - `src/colormap.js` — diverging/sequential color maps, legends, and RGBA output.
-- `src/engine.js` — browser rasterization, caching, and Fontra-facing analysis.
+- `src/elements.js` — contour flattening, winding/containment analysis, and
+  per-element grouping for components and counters.
+- `src/engine.js` — browser rasterization, per-element crops and compositing,
+  caching, and Fontra-facing analysis.
 - `src/panel.js` — the sidebar controls, legend, and glyph summary.
 - `src/ui.js` — self-contained UI primitives (panel base, DOM helpers, and
   settings persistence) so the plugin does not depend on Fontra’s internal
   module paths.
 - `demo/` — standalone browser preview.
-- `test/` — Node tests for model math and synthetic masks.
+- `test/` — Node tests for model math, synthetic masks, contour grouping, and
+  the per-element engine/canvas pipeline.
 
 ## License
 

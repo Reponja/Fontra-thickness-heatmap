@@ -39,6 +39,12 @@ const QUALITY_LABELS = {
   fine: "Fine",
 };
 
+const ELEMENT_FOCUS_LABELS = {
+  all: "All elements",
+  selected: "Selected element(s)",
+  hovered: "Hovered element",
+};
+
 function fmt(value, digits = 1) {
   return Number(value).toFixed(digits);
 }
@@ -290,10 +296,12 @@ export default class ThicknessHeatmapPanel extends Panel {
     this._analysisListener = (analysis) => {
       this._updateStats(analysis);
       this._updateLegend();
+      this._updateElementStatus(analysis);
     };
     thicknessEngine.addListener(this._analysisListener);
     this._updateStats(thicknessEngine.lastAnalysis);
     this._updateLegend();
+    this._updateElementStatus(thicknessEngine.lastAnalysis);
     this._syncControls();
 
     // Keep the panel checkbox in sync when the layer is switched from Fontra's
@@ -625,6 +633,68 @@ export default class ThicknessHeatmapPanel extends Panel {
     ]);
     this.fadeHelp = div({ class: "help" }, []);
 
+    const perElementCheckbox = input({
+      type: "checkbox",
+      id: "thickness-per-element",
+      checked: this.model.perElement,
+      onchange: (event) => {
+        this.model.perElement = event.target.checked;
+      },
+    });
+    this._controls.perElementCheckbox = perElementCheckbox;
+
+    const elementFocusSelect = select(
+      {
+        class: "select-input",
+        onchange: (event) => {
+          this.model.elementFocus = event.target.value;
+        },
+      },
+      Object.entries(ELEMENT_FOCUS_LABELS).map(([value, labelText]) =>
+        option(
+          {
+            value,
+            selected: this.model.elementFocus === value,
+          },
+          [labelText]
+        )
+      )
+    );
+    elementFocusSelect.id = "thickness-element-focus";
+    this._controls.elementFocusSelect = elementFocusSelect;
+
+    const fadeOtherCheckbox = input({
+      type: "checkbox",
+      checked: this.model.fadeOtherElements,
+      onchange: (event) => {
+        this.model.fadeOtherElements = event.target.checked;
+      },
+    });
+    this._controls.fadeOtherCheckbox = fadeOtherCheckbox;
+
+    this.fadeOtherRow = label({ class: "checkbox-row" }, [
+      fadeOtherCheckbox,
+      span({}, ["Fade other elements"]),
+    ]);
+    this.elementStatus = div({ class: "status-line" }, []);
+
+    const elementsSection = div({ class: "panel-section" }, [
+      div({ class: "section-heading" }, ["Elements"]),
+      label({ class: "checkbox-row" }, [
+        perElementCheckbox,
+        span({}, ["Measure each element separately"]),
+      ]),
+      div({ class: "help" }, [
+        "Each contour and component is measured on its own. Overlapping shapes no longer share a junction; a letter built as one contour still does.",
+      ]),
+      div({ class: "field-row" }, [
+        label({ for: "thickness-element-focus" }, ["Show"]),
+        elementFocusSelect,
+      ]),
+      this.fadeOtherRow,
+      this.elementStatus,
+    ]);
+
     const displaySection = div({ class: "panel-section" }, [
       div({ class: "section-heading" }, ["Display"]),
       div({ class: "field-row" }, [
@@ -705,6 +775,10 @@ export default class ThicknessHeatmapPanel extends Panel {
           "chord. Low-confidence fading is off in those views.",
         "Careful mode checks each stroke from both sides, which rejects chords across " +
           "curves and junctions. It is slower; turn it off when you only need a quick read.",
+        "Per-element mode measures every contour and component as its own shape. " +
+          "Overlapping shapes do not share a junction, and a selected or hovered element " +
+          "can be shown over faded neighbours. A letter built as a single contour still " +
+          "has its junctions measured together.",
         "This is a lens, not a judge. A bowl that is deliberately lighter than a stem, " +
           "an S spine that is deliberately heavier, or the thin right side of a V is expected " +
           "to show as a deviation. Read the pattern, not individual pixels.",
@@ -716,6 +790,7 @@ export default class ThicknessHeatmapPanel extends Panel {
       enabledSection,
       modelSection,
       displaySection,
+      elementsSection,
       legendSection,
       statsSection,
       this.statusLine,
@@ -772,6 +847,24 @@ export default class ThicknessHeatmapPanel extends Panel {
 
     if (this._controls.enabledCheckbox) {
       this._controls.enabledCheckbox.checked = settings.enabled;
+    }
+    if (this._controls.perElementCheckbox) {
+      this._controls.perElementCheckbox.checked = settings.perElement;
+    }
+    if (this._controls.elementFocusSelect) {
+      this._controls.elementFocusSelect.value = settings.elementFocus;
+      this._controls.elementFocusSelect.disabled = !settings.perElement;
+    }
+    if (this._controls.fadeOtherCheckbox) {
+      this._controls.fadeOtherCheckbox.checked = settings.fadeOtherElements;
+      this._controls.fadeOtherCheckbox.disabled =
+        !settings.perElement || settings.elementFocus === "all";
+    }
+    if (this.fadeOtherRow) {
+      this.fadeOtherRow.style.display =
+        settings.perElement && settings.elementFocus !== "all"
+          ? "flex"
+          : "none";
     }
 
     for (const [key, slider] of Object.entries(this._sliders)) {
@@ -896,6 +989,7 @@ export default class ThicknessHeatmapPanel extends Panel {
     }
 
     this._applyLayerEnabled(settings.enabled);
+    this._updateElementStatus(thicknessEngine.lastAnalysis);
   }
 
   _applyLayerEnabled(enabled) {
@@ -1015,6 +1109,10 @@ export default class ThicknessHeatmapPanel extends Panel {
       ["Contour samples", stats.count.toLocaleString()],
     ];
 
+    if (analysis.elements?.length) {
+      rows.push(["Elements measured", analysis.elements.length.toLocaleString()]);
+    }
+
     this.statsElement.replaceChildren(
       ...rows.flatMap(([labelText, value]) => [
         div({ class: "stat-label" }, [labelText]),
@@ -1022,6 +1120,31 @@ export default class ThicknessHeatmapPanel extends Panel {
       ])
     );
 
+  }
+
+  _updateElementStatus(analysis) {
+    if (!this.elementStatus) {
+      return;
+    }
+    const settings = normalizeSettings(this.model);
+    if (!settings.perElement) {
+      this.elementStatus.textContent =
+        "Whole-glyph measurement. Turn this on to measure each contour and component separately.";
+      return;
+    }
+    if (!analysis?.elements?.length) {
+      this.elementStatus.textContent = "No elements with ink to measure.";
+      return;
+    }
+    const count = analysis.elements.length;
+    const noun = count === 1 ? "element" : "elements";
+    const hint =
+      settings.elementFocus === "selected"
+        ? " Select points or a component in the glyph to focus it."
+        : settings.elementFocus === "hovered"
+          ? " Hover an element in the glyph to focus it."
+          : " All elements are shown.";
+    this.elementStatus.textContent = `${count} ${noun} measured independently.${hint}`;
   }
 
   _fitThicknesses() {
